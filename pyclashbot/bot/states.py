@@ -522,6 +522,7 @@ def state_tree(
                 False,
                 recording_flag=recording_flag,
                 custom_path=custom_path,
+                smart_battle=job_list.get(UIField.SMART_BATTLE_USER_TOGGLE, True),
             )
             is False
         ):
@@ -550,6 +551,7 @@ def state_tree(
                 called_from_launching=False,
                 recording_flag=False,
                 custom_path=custom_path,
+                smart_battle=job_list.get(UIField.SMART_BATTLE_USER_TOGGLE, True),
             )
             is False
         ):

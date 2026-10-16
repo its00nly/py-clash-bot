@@ -192,6 +192,12 @@ JOBS = [
         },
     ),
     JobConfig(
+        UIField.SMART_BATTLE_USER_TOGGLE,
+        "🧠 Smart battle AI",
+        default=True,
+        tooltip="Defend enemy pushes, counter-push the defended lane, and save win conditions for offense.",
+    ),
+    JobConfig(
         UIField.RANDOM_PLAYS_USER_TOGGLE,
         "❔ Random card plays",
         default=False,

@@ -196,15 +196,13 @@ ELIXIR_COLOR = [240, 137, 244]
 
 def count_elixir(emulator, elixir_count) -> bool:
     """Method to check for 4 elixir during a battle"""
-    iar = emulator.screenshot()
+    return elixir_at_least(emulator.screenshot(), elixir_count)
 
-    if pixel_is_equal(
-        iar[ELIXIR_COORDS[elixir_count - 1][0], ELIXIR_COORDS[elixir_count - 1][1]],
-        ELIXIR_COLOR,
-        tol=65,
-    ):
-        return True
-    return False
+
+def elixir_at_least(iar, elixir_count: int) -> bool:
+    """True when the elixir bar in a battle frame is filled to at least ``elixir_count``."""
+    y, x = ELIXIR_COORDS[elixir_count - 1]
+    return bool(pixel_is_equal(iar[y, x], ELIXIR_COLOR, tol=65))
 
 
 def check_pixels_for_win_in_battle_log(emulator) -> bool:

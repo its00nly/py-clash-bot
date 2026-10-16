@@ -172,3 +172,19 @@ REVEAL_MORE_CLAN_CHAT_CARD_OPTIONS_BUTTON_COORD = (34, 136)
 
 # --- Fight: champion ability ---
 CHAMPION_ABILITY_DISMISS_COORD = (330, 460)
+
+# --- Fight: smart battle AI (battle_brain.py) ---
+# Band of our half (plus the bridges) scanned for enemy level badges / HP bars (LTRB).
+ENEMY_UNIT_SCAN_REGION_LTRB = (15, 245, 404, 485)
+# x splitting the arena into the left and right lanes.
+LANE_SPLIT_X = 209
+# Vertical range where our troops can be dropped on our own half.
+OWN_HALF_DROP_Y_RANGE = (292, 462)
+# Center "pull" spots for defensive buildings, just behind the river.
+DEFENSE_BUILDING_PULL_COORDS = {"left": (190, 350), "right": (228, 350)}
+# Our tower footprints (LTRB) — troop drops inside these are nudged above the tower.
+OWN_TOWER_FOOTPRINTS_LTRB = (
+    (92, 350, 142, 410),  # left princess tower
+    (278, 350, 330, 410),  # right princess tower
+    (172, 395, 246, 462),  # king tower
+)

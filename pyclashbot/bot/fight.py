@@ -5,10 +5,13 @@ import random
 import time
 from typing import Literal
 
+from pyclashbot.bot import card_detection
+from pyclashbot.bot.battle_brain import BattleBrain
 from pyclashbot.bot.card_detection import (
     check_which_cards_are_available,
     create_default_bridge_iar,
     get_play_coords_for_card,
+    identify_hand_cards,
     is_hero_champion_ability_visible,
     switch_side,
     trigger_hero_champion_ability,
@@ -22,6 +25,7 @@ from pyclashbot.bot.coords import (
     QUICKMATCH_POPUP_BUTTON_COORD,
     START_FIGHT_BUTTON_COORD,
 )
+from pyclashbot.bot.find import find_enemy_units
 from pyclashbot.bot.nav import (
     check_for_in_battle_with_delay,
     get_to_activity_log,
@@ -44,6 +48,7 @@ from pyclashbot.bot.state_detect import (
     check_if_on_clash_main_menu,
     check_pixels_for_win_in_battle_log,
     count_elixir,
+    elixir_at_least,
 )
 from pyclashbot.utils.logger import Logger
 from pyclashbot.utils.versioning import __version__
@@ -69,6 +74,7 @@ def do_fight_state(
     called_from_launching=False,
     recording_flag: bool = False,
     custom_path: str | None = None,
+    smart_battle: bool = False,
 ) -> bool:
     """Handle the entirety of a battle state (start fight, do fight, end fight)."""
 
@@ -85,7 +91,10 @@ def do_fight_state(
     # Recording is started/stopped inside the fight loops themselves so each pack
     # brackets exactly the in-battle play loop (no pre-battle wait or post-fight nav).
     # Run regular fight loop if random mode not toggled
-    if not random_fight_mode and _fight_loop(emulator, logger, recording_flag, fight_mode_chosen, custom_path) is False:
+    if (
+        not random_fight_mode
+        and _fight_loop(emulator, logger, recording_flag, fight_mode_chosen, custom_path, smart_battle) is False
+    ):
         logger.change_status("Fight loop failed")
         return False
 
@@ -224,6 +233,7 @@ def wait_for_elixir(
     WAIT_THRESHOLD=5000,  # noqa: N803
     PLAY_THRESHOLD=10000,  # noqa: N803
     recording_flag: bool = False,
+    brain: BattleBrain | None = None,
 ) -> Literal["restart", "no battle"] | bool:
     """Method to wait for 4 elixir during a battle"""
     start_time = time.time()
@@ -243,6 +253,12 @@ def wait_for_elixir(
             last_logged_second = elapsed_second
 
         card_indices = check_which_cards_are_available(emulator)
+        if brain is not None and card_indices:
+            threat = brain.should_defend_now(find_enemy_units(card_detection.battle_iar))
+            if threat is not None:
+                logger.change_status(f"Enemy push in the {threat.lane} lane — defending now")
+                return True
+
         if is_hero_champion_ability_visible(emulator):
             if ability_available_since is None:
                 ability_available_since = time.time()
@@ -469,6 +485,35 @@ def play_a_card(emulator, logger, recording_flag: bool, battle_strategy: "Battle
     return True
 
 
+def play_smart_card(
+    emulator, logger, recording_flag: bool, battle_strategy: "BattleStrategy", brain: BattleBrain
+) -> bool:
+    """Read the hand and the board, then let the battle brain pick the card and spot."""
+    card_indices = check_which_cards_are_available(emulator, check_side=True)
+    if not card_indices:
+        logger.change_status("No cards ready yet...")
+        return False
+
+    iar = card_detection.battle_iar
+    hand = {index: identify_hand_cards(emulator, index) for index in card_indices}
+    threats = find_enemy_units(iar)
+    elapsed = battle_strategy.get_elapsed_time()
+    play = brain.choose(hand, threats, elapsed, elixir_full=iar is not None and elixir_at_least(iar, 10))
+    if play is None:
+        logger.change_status("Holding cards for the next enemy push")
+        time.sleep(0.5)
+        return False
+
+    logger.change_status(f"Playing {play.card_id} — {play.reason}")
+    emulator.click(*HAND_CARDS_COORDS[play.index])
+    emulator.click(*play.coord)
+    if recording_flag:
+        log_play(play.index, play.coord[0], play.coord[1], elapsed)
+    logger.add_card_played()
+    brain.record(play)
+    return True
+
+
 _PHASE_STRATEGIES = {
     "early": [0, 0, 0, 0, 0.3, 0.3, 0.4],  # 0-7s: Conservative, wait for more elixir
     "single": [0.05, 0.05, 0.1, 0.15, 0.15, 0.3, 0.2],  # 7-90s: Balanced distribution
@@ -539,7 +584,12 @@ class BattleStrategy:
 
 
 def _fight_loop(
-    emulator, logger: Logger, recording_flag: bool, fight_mode: str = "Classic 1v1", custom_path: str | None = None
+    emulator,
+    logger: Logger,
+    recording_flag: bool,
+    fight_mode: str = "Classic 1v1",
+    custom_path: str | None = None,
+    smart_battle: bool = False,
 ) -> bool:
     """Method for handling dynamically timed fight"""
     create_default_bridge_iar(emulator)
@@ -551,6 +601,9 @@ def _fight_loop(
     # Initialize battle strategy and start timing
     battle_strategy = BattleStrategy(fight_mode)
     battle_strategy.start_battle()
+    brain = BattleBrain() if smart_battle else None
+    if brain is not None:
+        logger.log(f"Smart battle AI on — opening in the {brain.attack_lane} lane")
 
     while True:
         if not check_for_in_battle_with_delay(emulator):
@@ -587,6 +640,7 @@ def _fight_loop(
             wait_threshold,
             play_threshold,
             recording_flag,
+            brain,
         )
 
         if wait_output == "restart":
@@ -606,7 +660,11 @@ def _fight_loop(
             continue
 
         play_start_time = time.time()
-        if play_a_card(emulator, logger, recording_flag, battle_strategy) is False:
+        if brain is not None:
+            played = play_smart_card(emulator, logger, recording_flag, battle_strategy, brain)
+        else:
+            played = play_a_card(emulator, logger, recording_flag, battle_strategy)
+        if played is False:
             logger.change_status("Failed to play a card, retrying...")
         else:
             logger.change_status(f"Made a play in {str(time.time() - play_start_time)[:4]}s")

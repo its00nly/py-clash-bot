@@ -6,7 +6,12 @@ detect_upgradable_cards reuses pixel_indicates_upgradable from state_detect (a l
 predicate module that does not import from find).
 """
 
-from pyclashbot.bot.coords import UPGRADE_POINTS
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from pyclashbot.bot.coords import ENEMY_UNIT_SCAN_REGION_LTRB, LANE_SPLIT_X, UPGRADE_POINTS
 from pyclashbot.bot.state_detect import pixel_indicates_upgradable
 from pyclashbot.detection.image_rec import find_image, pixel_is_equal
 
@@ -113,3 +118,48 @@ def detect_upgradable_cards(emulator):
             upgradable.append(i)
 
     return upgradable
+
+
+# Enemy units carry a dark-maroon level badge and a pink HP bar (ours are blue).
+# BGR bounds, measured on tests/fixtures/card_hand_bgr_regression.png.
+_ENEMY_BADGE_BGR = (np.array([22, 0, 85]), np.array([48, 14, 130]))
+_ENEMY_HP_BAR_BGR = (np.array([120, 65, 235]), np.array([165, 110, 255]))
+_MIN_ENEMY_MARKER_AREA = 8
+# The badge floats above the unit; shift down so the point lands on the troop itself.
+_BADGE_TO_BODY_DY = 15
+
+
+@dataclass(frozen=True)
+class EnemyUnit:
+    """An enemy troop seen on our half of the arena (screen coords)."""
+
+    x: int
+    y: int
+    size: int  # marker pixel count — a rough proxy for how big/healthy the unit is
+
+    @property
+    def lane(self) -> str:
+        return "left" if self.x < LANE_SPLIT_X else "right"
+
+
+def find_enemy_units(iar: np.ndarray | None) -> list[EnemyUnit]:
+    """Locate enemy troops on our side from a BGR battle frame, deepest (closest to us) first."""
+    if iar is None:
+        return []
+    left, top, right, bottom = ENEMY_UNIT_SCAN_REGION_LTRB
+    crop = iar[top:bottom, left:right]
+    if crop.size == 0:
+        return []
+    mask = cv2.bitwise_or(cv2.inRange(crop, *_ENEMY_BADGE_BGR), cv2.inRange(crop, *_ENEMY_HP_BAR_BGR))
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    units = [
+        EnemyUnit(
+            x=int(centroids[i][0]) + left,
+            y=int(centroids[i][1]) + top + _BADGE_TO_BODY_DY,
+            size=int(stats[i][cv2.CC_STAT_AREA]),
+        )
+        for i in range(1, count)
+        if stats[i][cv2.CC_STAT_AREA] >= _MIN_ENEMY_MARKER_AREA
+    ]
+    return sorted(units, key=lambda u: u.y, reverse=True)
