@@ -11,7 +11,13 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from pyclashbot.bot.coords import ENEMY_UNIT_SCAN_REGION_LTRB, LANE_SPLIT_X, UPGRADE_POINTS
+from pyclashbot.bot.coords import (
+    ENEMY_TOWER_HP_BARS,
+    ENEMY_UNIT_SCAN_REGION_LTRB,
+    LANE_SPLIT_X,
+    OWN_TOWER_HP_BARS,
+    UPGRADE_POINTS,
+)
 from pyclashbot.bot.state_detect import pixel_indicates_upgradable
 from pyclashbot.detection.image_rec import find_image, pixel_is_equal
 
@@ -163,3 +169,38 @@ def find_enemy_units(iar: np.ndarray | None) -> list[EnemyUnit]:
         if stats[i][cv2.CC_STAT_AREA] >= _MIN_ENEMY_MARKER_AREA
     ]
     return sorted(units, key=lambda u: u.y, reverse=True)
+
+
+# HP-bar fill colors (BGR) for princess towers: enemy pink-red, ours light blue.
+_ENEMY_TOWER_FILL_BGR = np.array([94, 38, 226])
+_OWN_TOWER_FILL_BGR = np.array([255, 210, 114])
+_TOWER_FILL_TOLERANCE = 40
+
+
+@dataclass(frozen=True)
+class TowerHealth:
+    """Princess-tower HP as a 0..1 fraction per lane (0 also means destroyed/unreadable)."""
+
+    enemy: dict[str, float]
+    own: dict[str, float]
+
+
+def _bar_fraction(iar: np.ndarray, bar: tuple[int, int, int], fill: np.ndarray) -> float:
+    x_left, x_right, y = bar
+    # Sample the bar's row and the one above it; take the better read (troops can cover one).
+    best = 0.0
+    for row in (y, y - 1):
+        pixels = iar[row, x_left : x_right + 1].astype(int)
+        filled = np.all(np.abs(pixels - fill) <= _TOWER_FILL_TOLERANCE, axis=-1)
+        best = max(best, float(filled.mean()) if filled.size else 0.0)
+    return best
+
+
+def read_tower_health(iar: np.ndarray | None) -> TowerHealth | None:
+    """Read princess-tower HP bars from a BGR battle frame."""
+    if iar is None:
+        return None
+    return TowerHealth(
+        enemy={lane: _bar_fraction(iar, bar, _ENEMY_TOWER_FILL_BGR) for lane, bar in ENEMY_TOWER_HP_BARS.items()},
+        own={lane: _bar_fraction(iar, bar, _OWN_TOWER_FILL_BGR) for lane, bar in OWN_TOWER_HP_BARS.items()},
+    )

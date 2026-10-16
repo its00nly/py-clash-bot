@@ -188,3 +188,8 @@ OWN_TOWER_FOOTPRINTS_LTRB = (
     (278, 350, 330, 410),  # right princess tower
     (172, 395, 246, 462),  # king tower
 )
+# Princess-tower HP bars: (x_left, x_right, y) per lane, measured on the battle fixture.
+ENEMY_TOWER_HP_BARS = {"left": (103, 141, 96), "right": (289, 327, 96)}
+OWN_TOWER_HP_BARS = {"left": (103, 141, 393), "right": (290, 327, 393)}
+# Back-of-lane drop spots for a calm opening play (behind our princess towers).
+OPENING_BACK_COORDS = {"left": (115, 450), "right": (303, 450)}

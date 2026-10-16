@@ -17,7 +17,9 @@ Pure decision logic over (hand, enemy units, time) so it is unit-testable offlin
 
 from __future__ import annotations
 
+import collections
 import random
+import statistics
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -26,6 +28,7 @@ from pyclashbot.bot.card_detection import calculate_play_coords, get_card_group
 from pyclashbot.bot.coords import (
     DEFENSE_BUILDING_PULL_COORDS,
     LANE_SPLIT_X,
+    OPENING_BACK_COORDS,
     OWN_HALF_DROP_Y_RANGE,
     OWN_TOWER_FOOTPRINTS_LTRB,
     PLAYABLE_PLAY_REGION_LTRB,
@@ -34,7 +37,7 @@ from pyclashbot.bot.coords import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from pyclashbot.bot.find import EnemyUnit
+    from pyclashbot.bot.find import EnemyUnit, TowerHealth
 
 ROLE_WIN = "win"
 ROLE_TROOP = "troop"
@@ -99,9 +102,13 @@ BUILDINGS = frozenset({"barb_hut", "furnace", "goblin_hut", "tombstone"})
 _SUPPORT_GROUPS = frozenset({"back_support", "king_lane", "princess"})
 
 _DEFENSE_PRIORITY = (ROLE_TROOP, ROLE_SUPPORT, ROLE_BUILDING, ROLE_SPELL, ROLE_OWN_SIDE_SPELL)
-_OFFENSE_PRIORITY = (ROLE_WIN, ROLE_SUPPORT, ROLE_TROOP, ROLE_SPELL)
-# Only played on an empty board to avoid leaking elixir.
-_LEAK_PRIORITY = (ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL)
+_OFFENSE_PRIORITY = (ROLE_WIN, ROLE_SUPPORT, ROLE_TROOP)
+# Right after a win condition goes down: back it up instead of stacking another one.
+_FOLLOW_UP_PRIORITY = (ROLE_SUPPORT, ROLE_TROOP, ROLE_WIN)
+# Opening play: something cheap at the back, never a naked win condition at the bridge.
+_OPENING_PRIORITY = (ROLE_SUPPORT, ROLE_TROOP)
+# Only played when elixir is about to leak (spells also when they can finish a tower / chip late).
+_LEAK_PRIORITY = (ROLE_SPELL, ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL)
 
 # Melee/tank defenders go just behind the enemy so it walks into them; ranged support further back.
 _TROOP_DEFENSE_DY = 45
@@ -110,9 +117,23 @@ _SUPPORT_DEFENSE_DY = 85
 _SPELL_LEAD_DY = 12
 # After defending a lane, ignore further pings there for this long unless the push gets deeper.
 DEFENSE_COOLDOWN_S = 4.0
+# ...shorter when that lane's tower is already low.
+WEAK_TOWER_DEFENSE_COOLDOWN_S = 2.0
 _DEEPER_PUSH_DY = 40
 # How long offense keeps favoring the lane we just defended.
 COUNTER_PUSH_WINDOW_S = 12.0
+# How long after a win condition we prefer backing it up with support.
+SUPPORT_FOLLOW_UP_S = 8.0
+# The opening play happens within this window (later first plays are just normal offense).
+OPENING_WINDOW_S = 25.0
+# From here on (overtime-ish) spells are worth throwing at towers for chip damage.
+SPELL_CHIP_AFTER_S = 150.0
+
+# Tower health (0..1 fractions of the HP bar, median of recent reads).
+WEAK_TOWER_HP = 0.4
+FINISH_TOWER_HP = 0.25
+LANE_SWITCH_HP_MARGIN = 0.15
+_TOWER_HISTORY = 5
 
 
 def _base_card_id(card_id: str) -> str:
@@ -185,8 +206,12 @@ class Play:
     reason: str
 
 
+def _other(lane: str) -> str:
+    return "left" if lane == "right" else "right"
+
+
 class BattleBrain:
-    """Per-battle state: which lane we attack, recent plays, defense cooldowns."""
+    """Per-battle state: which lane we attack, recent plays, defense cooldowns, tower health."""
 
     def __init__(self, clock=time.time, rng: random.Random | None = None) -> None:
         self._clock = clock
@@ -195,6 +220,14 @@ class BattleBrain:
         self._counter_push_lane: str | None = None
         self._counter_push_until = 0.0
         self._last_defense: dict[str, tuple[float, int]] = {}  # lane -> (time, threat y)
+        self._last_win: tuple[str, float] | None = None  # lane, time of our last win-condition drop
+        self._played_any = False
+        self._enemy_hp: dict[str, collections.deque[float]] = {
+            lane: collections.deque(maxlen=_TOWER_HISTORY) for lane in ("left", "right")
+        }
+        self._own_hp: dict[str, collections.deque[float]] = {
+            lane: collections.deque(maxlen=_TOWER_HISTORY) for lane in ("left", "right")
+        }
         self.recent: list[int] = []
 
     def _pick(self, candidates: list[tuple[int, str, str]]) -> tuple[int, str, str]:
@@ -202,22 +235,56 @@ class BattleBrain:
         fresh = [c for c in candidates if c[0] not in self.recent]
         return self._rng.choice(fresh or candidates)
 
+    # ---- towers --------------------------------------------------------------
+
+    def observe_towers(self, health: TowerHealth | None) -> None:
+        """Feed one tower-HP read; a median over recent reads smooths troops covering the bars."""
+        if health is None:
+            return
+        for lane in ("left", "right"):
+            self._enemy_hp[lane].append(health.enemy.get(lane, 0.0))
+            self._own_hp[lane].append(health.own.get(lane, 0.0))
+
+    def enemy_tower_hp(self, lane: str) -> float | None:
+        reads = self._enemy_hp[lane]
+        return statistics.median(reads) if reads else None
+
+    def own_tower_hp(self, lane: str) -> float | None:
+        reads = self._own_hp[lane]
+        return statistics.median(reads) if reads else None
+
+    def _own_tower_weak(self, lane: str) -> bool:
+        hp = self.own_tower_hp(lane)
+        return hp is not None and hp < WEAK_TOWER_HP
+
     # ---- lanes ---------------------------------------------------------------
 
     def offense_lane(self) -> str:
         if self._counter_push_lane and self._clock() < self._counter_push_until:
             return self._counter_push_lane
+        # Pile onto the weaker enemy tower once one side is clearly ahead.
+        left, right = self.enemy_tower_hp("left"), self.enemy_tower_hp("right")
+        if left is not None and right is not None:
+            if left + LANE_SWITCH_HP_MARGIN < right:
+                return "left"
+            if right + LANE_SWITCH_HP_MARGIN < left:
+                return "right"
         return self.attack_lane
 
     def should_defend_now(self, threats: Sequence[EnemyUnit]) -> EnemyUnit | None:
-        """Return the threat to answer immediately, or None if it's already handled."""
+        """Return the threat to answer immediately, or None if it's already handled.
+
+        Threats against a low tower come first; otherwise the deepest one.
+        """
         now = self._clock()
-        for threat in threats:  # deepest first
+        ordered = sorted(threats, key=lambda t: (not self._own_tower_weak(t.lane), -t.y))
+        for threat in ordered:
             last = self._last_defense.get(threat.lane)
             if last is None:
                 return threat
             when, defended_y = last
-            if now - when >= DEFENSE_COOLDOWN_S or threat.y > defended_y + _DEEPER_PUSH_DY:
+            cooldown = WEAK_TOWER_DEFENSE_COOLDOWN_S if self._own_tower_weak(threat.lane) else DEFENSE_COOLDOWN_S
+            if now - when >= cooldown or threat.y > defended_y + _DEEPER_PUSH_DY:
                 return threat
         return None
 
@@ -251,12 +318,28 @@ class BattleBrain:
                         f"defending the {threat.lane} lane",
                     )
             # Nothing that defends — pressure the other lane instead.
-            lane = "left" if threat.lane == "right" else "right"
+            lane = _other(threat.lane)
+            priorities, reason = _OFFENSE_PRIORITY, f"pressuring the {lane} lane"
+        elif self._is_opening(elapsed_s) and any(c[2] in _OPENING_PRIORITY for c in cards):
+            lane = self.offense_lane()
+            index, card_id, picked = self._pick([c for c in cards if c[2] in _OPENING_PRIORITY])
+            return Play(index, card_id, picked, OPENING_BACK_COORDS[lane], lane, False, "opening at the back")
+        elif self._last_win is not None and self._clock() - self._last_win[1] < SUPPORT_FOLLOW_UP_S:
+            lane = self._last_win[0]
+            priorities, reason = _FOLLOW_UP_PRIORITY, f"backing up the push in the {lane} lane"
         else:
             lane = self.offense_lane()
+            priorities, reason = _OFFENSE_PRIORITY, f"pushing the {lane} lane"
 
-        priorities = _OFFENSE_PRIORITY + _LEAK_PRIORITY if elixir_full else _OFFENSE_PRIORITY
-        for role in priorities:
+        enemy_hp = self.enemy_tower_hp(lane)
+        finishing = enemy_hp is not None and 0 < enemy_hp <= FINISH_TOWER_HP
+        spell_worth_it = finishing or elapsed_s >= SPELL_CHIP_AFTER_S
+        if spell_worth_it:
+            priorities = (*priorities, ROLE_SPELL)
+        if elixir_full:
+            priorities = (*priorities, *_LEAK_PRIORITY)
+
+        for role in dict.fromkeys(priorities):  # de-dupe, keep order
             options = [c for c in cards if c[2] == role]
             if not options:
                 continue
@@ -264,10 +347,17 @@ class BattleBrain:
             coord = self._offense_drop(card_id, picked, lane, elapsed_s)
             if coord is None:
                 continue
-            leak = picked in _LEAK_PRIORITY
-            reason = "spending elixir before it leaks" if leak else f"pushing the {lane} lane"
-            return Play(index, card_id, picked, coord, lane, False, reason)
+            if picked == ROLE_SPELL and spell_worth_it:
+                why = f"finishing the {lane} tower" if finishing else "chipping the tower"
+            elif picked in _LEAK_PRIORITY:
+                why = "spending elixir before it leaks"
+            else:
+                why = reason
+            return Play(index, card_id, picked, coord, lane, False, why)
         return None
+
+    def _is_opening(self, elapsed_s: float) -> bool:
+        return not self._played_any and elapsed_s < OPENING_WINDOW_S
 
     def _offense_drop(self, card_id: str, role: str, lane: str, elapsed_s: float) -> tuple[int, int] | None:
         if role == ROLE_BUILDING:
@@ -280,9 +370,12 @@ class BattleBrain:
 
     def record(self, play: Play) -> None:
         """Remember a play we made (call after the clicks went through)."""
+        self._played_any = True
         self.recent = [*self.recent[-2:], play.index]
+        now = self._clock()
         if play.defensive:
-            now = self._clock()
             self._last_defense[play.lane] = (now, play.coord[1])
             self._counter_push_lane = play.lane
             self._counter_push_until = now + COUNTER_PUSH_WINDOW_S
+        elif play.role == ROLE_WIN:
+            self._last_win = (play.lane, now)

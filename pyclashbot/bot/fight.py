@@ -25,7 +25,7 @@ from pyclashbot.bot.coords import (
     QUICKMATCH_POPUP_BUTTON_COORD,
     START_FIGHT_BUTTON_COORD,
 )
-from pyclashbot.bot.find import find_enemy_units
+from pyclashbot.bot.find import find_enemy_units, read_tower_health
 from pyclashbot.bot.nav import (
     check_for_in_battle_with_delay,
     get_to_activity_log,
@@ -497,6 +497,7 @@ def play_smart_card(
     iar = card_detection.battle_iar
     hand = {index: identify_hand_cards(emulator, index) for index in card_indices}
     threats = find_enemy_units(iar)
+    brain.observe_towers(read_tower_health(iar))
     elapsed = battle_strategy.get_elapsed_time()
     play = brain.choose(hand, threats, elapsed, elixir_full=iar is not None and elixir_at_least(iar, 10))
     if play is None:

@@ -245,3 +245,89 @@ def test_wait_for_elixir_stops_early_to_defend(frame, monkeypatch):
     # Fixture has 5 elixir; waiting for 8 would normally block, but the balloon is on our side.
     assert fight.wait_for_elixir(_FakeEmulator(frame), logger, 8, brain=_brain()) is True
     assert any("Enemy push in the left lane" in s for s in logger.statuses)
+
+
+# ---- round 2: towers, opening, follow-up, spells ------------------------------
+
+
+def _health(enemy_left=1.0, enemy_right=1.0, own_left=1.0, own_right=1.0):
+    from pyclashbot.bot.find import TowerHealth
+
+    return TowerHealth(enemy={"left": enemy_left, "right": enemy_right}, own={"left": own_left, "right": own_right})
+
+
+def test_reads_full_towers_on_the_fixture(frame):
+    from pyclashbot.bot.find import read_tower_health
+
+    health = read_tower_health(frame)
+    assert health is not None
+    assert all(v > 0.9 for v in (*health.enemy.values(), *health.own.values()))
+
+
+def test_reads_a_damaged_tower(frame):
+    from pyclashbot.bot.find import read_tower_health
+
+    frame[90:100, 122:142] = (35, 0, 117)  # darken the right half of the enemy left bar
+    health = read_tower_health(frame)
+    assert health is not None
+    assert 0.4 < health.enemy["left"] < 0.6
+    assert health.enemy["right"] > 0.9
+
+
+def test_attacks_the_weaker_enemy_tower():
+    brain = _brain()
+    brain.attack_lane = "left"
+    for _ in range(3):
+        brain.observe_towers(_health(enemy_left=0.9, enemy_right=0.5))
+    assert brain.offense_lane() == "right"
+
+
+def test_tower_median_ignores_one_bad_read():
+    brain = _brain()
+    brain.attack_lane = "left"
+    for hp in (1.0, 1.0, 0.0, 1.0, 1.0):  # one frame with a troop covering the bar
+        brain.observe_towers(_health(enemy_right=hp))
+    assert brain.offense_lane() == "left"
+
+
+def test_weak_own_tower_is_defended_first():
+    brain = _brain()
+    for _ in range(3):
+        brain.observe_towers(_health(own_right=0.2))
+    deep_left, shallow_right = EnemyUnit(100, 400, 40), EnemyUnit(300, 300, 40)
+    assert brain.should_defend_now([deep_left, shallow_right]) is shallow_right
+
+
+def test_opening_plays_support_at_the_back():
+    brain = _brain()
+    play = brain.choose(FIXTURE_HAND, [], elapsed_s=8)
+    assert play is not None
+    assert play.card_id in {"ice_wizard", "lumberjack", "hero_bowler"}
+    assert play.coord[1] >= 440
+    brain.record(play)
+    # After the first play, offense is normal again.
+    play = brain.choose(FIXTURE_HAND, [], elapsed_s=12)
+    assert play is not None and play.card_id == "ram_rider"
+
+
+def test_backs_up_a_win_condition_instead_of_stacking():
+    clock = _Clock()
+    brain = _brain(clock)
+    brain.record(brain.choose({0: "hog", 1: "musketeer"}, [], elapsed_s=40) or pytest.fail("no play"))
+    clock.now += 2
+    play = brain.choose({0: "balloon", 1: "musketeer"}, [], elapsed_s=42)
+    assert play is not None and play.card_id == "musketeer"
+    assert "backing up" in play.reason
+
+
+def test_spells_saved_unless_they_finish_a_tower_or_overtime():
+    hand = {0: "fireball"}
+    assert _brain().choose(hand, [], elapsed_s=60) is None
+    assert _brain().choose(hand, [], elapsed_s=160) is not None
+
+    brain = _brain()
+    brain.attack_lane = "left"
+    for _ in range(3):
+        brain.observe_towers(_health(enemy_left=0.2, enemy_right=0.2))
+    play = brain.choose(hand, [], elapsed_s=60)
+    assert play is not None and "finishing" in play.reason
