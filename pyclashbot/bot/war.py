@@ -164,6 +164,7 @@ def _scroll_war_page(emulator, direction: str) -> None:
 
 def _find_and_click_war_battle_icon(emulator, logger) -> bool:
     for i in range(_FIND_BATTLE_MAX_LOOPS):
+        _dismiss_war_overlay(emulator, logger)
         direction = "up" if i % 2 == 0 else "down"
         logger.log(f"Scrolling war page {direction} (scroll {i + 1}/{_FIND_BATTLE_MAX_LOOPS})")
         _scroll_war_page(emulator, direction)
@@ -176,6 +177,16 @@ def _find_and_click_war_battle_icon(emulator, logger) -> bool:
             return True
     logger.change_status("Could not find a war battle icon after 10 scrolls")
     return False
+
+
+def _dismiss_war_overlay(emulator, logger) -> None:
+    """Dismiss any post-war-day results overlay (e.g. 'Battle Day 3' screen)."""
+    for _ in range(3):
+        if check_if_on_war(emulator):
+            return
+        logger.change_status("Dismissing war overlay...")
+        emulator.click(*OK_AFTER_WAR_BATTLE_COMPLETE_BUTTON_COORD)
+        time.sleep(2)
 
 
 def _wait_for_war_page(emulator, timeout: float) -> bool:
@@ -201,6 +212,7 @@ def war_state(emulator, logger) -> bool:
         logger.change_status("Failed to navigate to war page")
         return False
     time.sleep(1)
+    _dismiss_war_overlay(emulator, logger)
     logger.log("Verifying war page is visible")
     if not check_if_on_war(emulator):
         logger.change_status("Did not land on war page")
@@ -248,6 +260,8 @@ def war_state(emulator, logger) -> bool:
         if not _wait_for_war_page(emulator, _WAIT_FOR_WAR_AFTER_BATTLE_S):
             logger.change_status("Did not return to war page within 30s")
             return False
+
+    logger.add_war_fight()
 
     logger.log("Navigating from war page back to main page")
     if not navigate_main_page(emulator, logger, PAGE_WAR, PAGE_MAIN):
