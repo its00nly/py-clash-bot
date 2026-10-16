@@ -279,7 +279,5 @@ class AdbBasedController(BaseEmulatorController, ABC):
         logger.info("Launching app: %s", package_name)
         result = self.adb(f"shell monkey -p {package_name} -c android.intent.category.LAUNCHER 1")
         if result.returncode != 0:
-            raise EmulatorNotReadyError(
-                f"Failed to launch {package_name}: monkey returned rc={result.returncode}"
-            )
+            raise EmulatorNotReadyError(f"Failed to launch {package_name}: monkey returned rc={result.returncode}")
         return True
