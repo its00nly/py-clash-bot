@@ -1,5 +1,7 @@
 # --- Clash main / global ---
 CLASH_MAIN_DEADSPACE_COORD = (35, 500)
+# Tapped while waiting for the main menu after an emulator boot (dismisses splash/popups).
+BOOT_MAIN_MENU_DEADSPACE_COORD = (35, 405)
 
 # --- Nav ---
 CLASH_MAIN_OPTIONS_BURGER_BUTTON = (390, 62)

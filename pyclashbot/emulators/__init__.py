@@ -16,6 +16,7 @@ class EmulatorType(StrEnum):
     GOOGLE_PLAY = "Google Play Games"
     BLUESTACKS = "BlueStacks 5"
     ADB = "ADB Device"
+    MUMU = "MuMu Player 12"
 
 
 def get_emulator_registry() -> dict[EmulatorType, type["BaseEmulatorController"]]:
@@ -39,9 +40,11 @@ def get_emulator_registry() -> dict[EmulatorType, type["BaseEmulatorController"]
     if is_windows():
         from pyclashbot.emulators.google_play import GooglePlayEmulatorController
         from pyclashbot.emulators.memu import MemuEmulatorController
+        from pyclashbot.emulators.mumu import MuMuEmulatorController
 
         registry[EmulatorType.GOOGLE_PLAY] = GooglePlayEmulatorController
         registry[EmulatorType.MEMU] = MemuEmulatorController
+        registry[EmulatorType.MUMU] = MuMuEmulatorController
 
     return registry
 
