@@ -1,3 +1,5 @@
+import datetime as dt
+import time
 import traceback
 from multiprocessing import Process, Queue
 from multiprocessing.synchronize import Event
@@ -9,6 +11,12 @@ from pyclashbot.emulators.base import EmulatorNotReadyError
 from pyclashbot.interface.enums import UIField
 from pyclashbot.utils.logger import ProcessLogger, attach_worker_file_logging
 from pyclashbot.utils.platform import is_macos
+from pyclashbot.utils.session_control import SessionSettings, is_active_now, limit_reached, seconds_until_active
+
+# Pacing decisions returned by WorkerProcess._pace() between states.
+PACE_CONTINUE = "continue"
+PACE_STOP = "stop"
+PACE_RELAUNCH = "relaunch"
 
 
 class WorkerProcess(Process):
@@ -24,12 +32,72 @@ class WorkerProcess(Process):
         stats_queue: Queue,
         shutdown_event: Event,
         session_log_path: str,
+        pause_event: Event | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.jobs = jobs
         self.stats_queue = stats_queue
         self.shutdown_event = shutdown_event
+        self.pause_event = pause_event
         self.session_log_path = session_log_path
+        self.session = SessionSettings.from_jobs(jobs)
+
+    def _startup_countdown(self, logger: ProcessLogger) -> bool:
+        """Hold off launching the emulator for the configured delay (#752).
+
+        Returns False if the bot was stopped during the countdown.
+        """
+        remaining = self.session.startup_delay_s
+        while remaining > 0:
+            if remaining <= 10 or remaining % 10 == 0:
+                logger.change_status(f"Starting the emulator in {remaining}s...")
+            if self.shutdown_event.wait(1):
+                return False
+            remaining -= 1
+        return True
+
+    def _wait_while_paused(self, logger: ProcessLogger) -> None:
+        if self.pause_event is None or not self.pause_event.is_set():
+            return
+        logger.change_status("Paused - press Resume to continue")
+        while self.pause_event.is_set() and not self.shutdown_event.is_set():
+            self.shutdown_event.wait(0.5)
+        if not self.shutdown_event.is_set():
+            logger.change_status("Resumed")
+
+    def _wait_for_active_hours(self) -> bool:
+        """Sleep until the active window opens. Returns False if the bot was stopped."""
+        while not is_active_now(self.session, dt.datetime.now()):
+            wait_s = min(60.0, max(1.0, seconds_until_active(self.session, dt.datetime.now())))
+            if self.shutdown_event.wait(wait_s):
+                return False
+        return True
+
+    def _pace(self, emulator, logger: ProcessLogger) -> str:
+        """Apply pause, session limits and the active-hours window between states."""
+        self._wait_while_paused(logger)
+        if self.shutdown_event.is_set():
+            return PACE_STOP
+
+        started = logger.start_time or time.time()
+        reason = limit_reached(self.session, logger.get_stats(), time.time() - started)
+        if reason is not None:
+            logger.change_status(f"Session limit reached ({reason}) - stopping")
+            return PACE_STOP
+
+        if is_active_now(self.session, dt.datetime.now()):
+            return PACE_CONTINUE
+
+        resume_at = f"{self.session.active_start_hour:02d}:00"
+        logger.change_status(f"Outside active hours - closing the emulator until {resume_at}")
+        try:
+            emulator.stop()
+        except Exception as e:
+            logger.log(f"Could not stop the emulator for the off-hours break: {e}")
+        if not self._wait_for_active_hours():
+            return PACE_STOP
+        logger.change_status("Active hours started - relaunching the emulator")
+        return PACE_RELAUNCH
 
     def _setup_emulator(self, jobs: dict[str, Any], logger: ProcessLogger):
         """Set up the appropriate emulator based on job configuration."""
@@ -68,6 +136,11 @@ class WorkerProcess(Process):
                 render_mode = jobs.get("memu_render_mode", "opengl")
                 emu = controller_class(logger, render_mode)
 
+            elif emulator_selection == EmulatorType.MUMU:
+                print("Creating MuMu Player 12 emulator")
+                instance_index = int(jobs.get(UIField.MUMU_INSTANCE_INDEX.value, 0) or 0)
+                emu = controller_class(logger=logger, instance_index=instance_index)
+
             elif emulator_selection == EmulatorType.ADB:
                 print("Creating ADB Device controller")
                 adb_serial = jobs.get(UIField.ADB_SERIAL.value) or None
@@ -99,6 +172,17 @@ class WorkerProcess(Process):
         max_consecutive_restarts = 5
 
         while not self.shutdown_event.is_set():
+            pace = self._pace(emulator, logger)
+            if pace == PACE_STOP:
+                break
+            if pace == PACE_RELAUNCH:
+                try:
+                    emulator.restart()
+                    state = "start"
+                except EmulatorNotReadyError as e:
+                    logger.log(f"Relaunch after off-hours break failed: {e}")
+                    state = "restart"
+
             try:
                 new_state = state_tree(emulator, logger, state, jobs, state_history, state_order)
 
@@ -137,9 +221,6 @@ class WorkerProcess(Process):
                     logger.error("Too many consecutive exceptions - stopping bot")
                     break
 
-            # Note: Pause functionality removed in multiprocessing version
-            # If pause is needed, use a separate mp.Event
-
     def run(self) -> None:
         """Main worker process execution."""
         print("WorkerProcess run()...")
@@ -149,6 +230,15 @@ class WorkerProcess(Process):
         logger = ProcessLogger(self.stats_queue)
 
         try:
+            if not self._startup_countdown(logger):
+                return
+            # Respect the schedule before booting: don't launch outside active hours.
+            if not is_active_now(self.session, dt.datetime.now()):
+                logger.change_status(
+                    f"Outside active hours - waiting until {self.session.active_start_hour:02d}:00 to start"
+                )
+                if not self._wait_for_active_hours():
+                    return
             emulator = self._setup_emulator(self.jobs, logger)
             if emulator is None:
                 return

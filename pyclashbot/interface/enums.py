@@ -77,6 +77,16 @@ class UIField(StrEnum):
     ADB_SERIAL = "adb_serial"
     GP_DEVICE_SERIAL = "gp_device_serial"
     BS_DEVICE_SERIAL = "bs_device_serial"
+    MUMU_EMULATOR_TOGGLE = "mumu_emulator_toggle"
+    MUMU_INSTANCE_INDEX = "mumu_instance_index"
+    STARTUP_DELAY_SECONDS = "startup_delay_seconds"
+    MAX_BATTLES_PER_SESSION = "max_battles_per_session"
+    MAX_SESSION_MINUTES = "max_session_minutes"
+    SCHEDULE_TOGGLE = "schedule_toggle"
+    ACTIVE_START_HOUR = "active_start_hour"
+    ACTIVE_END_HOUR = "active_end_hour"
+    DISCORD_WEBHOOK_TOGGLE = "discord_webhook_toggle"
+    DISCORD_WEBHOOK_URL = "discord_webhook_url"
 
 
 WIN_RATE_STAT_LABELS: dict[StatField, str] = {

@@ -23,6 +23,7 @@ from pyclashbot.interface.config import (
     GOOGLE_PLAY_SETTINGS,
     JOBS,
     MEMU_SETTINGS,
+    SESSION_SETTING_DEFAULTS,
     ComboConfig,
     JobConfig,
 )
@@ -114,7 +115,7 @@ _TAB_SECTION_PADDING = (8, 6)
 _TAB_CONTAINER_PADDING = (10, 8)
 _NOTEBOOK_STYLE = "App.TNotebook"
 _NOTEBOOK_TAB_STYLE = "App.TNotebook.Tab"
-_NOTEBOOK_TAB_COUNT = 4
+_NOTEBOOK_TAB_COUNT = 5
 _NOTEBOOK_TAB_WIDTH_DIVISOR = 6  # Tcl tab width units vs notebook pixels (approx.)
 _IDLE_STATUS = "Idle"
 _START_BLOCKED_MESSAGE = "Enable at least one Battles, Clan chat, or Collection job to start."
@@ -126,6 +127,9 @@ _DISCORD_INVITE_URL = "https://pyclashbot.app/discord/invite"
 _GITHUB_PROJECT_URL = "https://github.com/pyclashbot/py-clash-bot"
 _UPLOAD_RECORDINGS_URL = "https://www.royaletrainer.com/upload"
 # How often the "recordings using N GB" note recomputes folder size (ms).
+# Session-tab fields that are on/off toggles or free text; the rest are numeric spinboxes.
+_SESSION_BOOL_FIELDS = (UIField.SCHEDULE_TOGGLE, UIField.DISCORD_WEBHOOK_TOGGLE)
+_SESSION_TEXT_FIELDS = (UIField.DISCORD_WEBHOOK_URL,)
 _RECORDINGS_SIZE_REFRESH_MS = 3 * 60 * 1000  # 3 minutes
 _DISCORD_BRAND = "#5865F2"
 _GITHUB_BRAND = "#238636"
@@ -162,6 +166,8 @@ class PyClashBotUI(ttk.Window):
         # Show the resolved default location in the box until the user picks a custom one.
         self.recording_folder_path_var = ttk.StringVar(value=get_recordings_dir())
         self.advanced_settings_var = ttk.BooleanVar(value=False)
+        self.session_vars: dict[UIField, tk.Variable] = {}
+        self._test_webhook_callback: Callable[[str], None] | None = None
         self._config_callback: Callable[[dict[str, object]], None] | None = None
         self._open_logs_callback: Callable[[], None] | None = None
         self._open_recordings_callback: Callable[[], None] | None = None
@@ -197,6 +203,9 @@ class PyClashBotUI(ttk.Window):
     def register_open_recordings_callback(self, callback: Callable[[], None]) -> None:
         self._open_recordings_callback = callback
 
+    def register_test_webhook_callback(self, callback: Callable[[str], None]) -> None:
+        self._test_webhook_callback = callback
+
     def get_all_values(self) -> dict[str, object]:
         values: dict[str, object] = {}
         for field, var in self.jobs_vars.items():
@@ -223,6 +232,8 @@ class PyClashBotUI(ttk.Window):
         values[UIField.GOOGLE_PLAY_EMULATOR_TOGGLE.value] = emulator_choice == EmulatorType.GOOGLE_PLAY
         values[UIField.BLUESTACKS_EMULATOR_TOGGLE.value] = emulator_choice == EmulatorType.BLUESTACKS
         values[UIField.ADB_TOGGLE.value] = emulator_choice == EmulatorType.ADB
+        values[UIField.MUMU_EMULATOR_TOGGLE.value] = emulator_choice == EmulatorType.MUMU
+        values[UIField.MUMU_INSTANCE_INDEX.value] = self._safe_int(self.mumu_instance_var.get(), fallback=0)
 
         memu_render = self.memu_render_var.get()
         values[UIField.DIRECTX_TOGGLE.value] = memu_render == "DirectX"
@@ -244,6 +255,14 @@ class PyClashBotUI(ttk.Window):
         values[UIField.DISCORD_RPC_TOGGLE.value] = bool(self.discord_rpc_var.get())
         values[UIField.RECORD_FIGHTS_TOGGLE.value] = bool(self.record_fights_var.get())
         values[UIField.RECORDING_FOLDER_PATH.value] = self.recording_folder_path_var.get() or ""
+        for field, var in self.session_vars.items():
+            if field in _SESSION_BOOL_FIELDS:
+                values[field.value] = bool(var.get())
+            elif field in _SESSION_TEXT_FIELDS:
+                values[field.value] = str(var.get()).strip()
+            else:
+                default = self._safe_int(SESSION_SETTING_DEFAULTS[field])
+                values[field.value] = self._safe_int(var.get(), fallback=default)
         return values
 
     def set_all_values(self, values: dict[str, object]) -> None:
@@ -273,6 +292,7 @@ class PyClashBotUI(ttk.Window):
                 UIField.BLUESTACKS_EMULATOR_TOGGLE.value,
                 UIField.ADB_TOGGLE.value,
                 UIField.MEMU_EMULATOR_TOGGLE.value,
+                UIField.MUMU_EMULATOR_TOGGLE.value,
             }
             if emulator_keys & values.keys():
                 if values.get(UIField.GOOGLE_PLAY_EMULATOR_TOGGLE.value):
@@ -281,6 +301,8 @@ class PyClashBotUI(ttk.Window):
                     saved_emulator = EmulatorType.BLUESTACKS
                 elif values.get(UIField.ADB_TOGGLE.value):
                     saved_emulator = EmulatorType.ADB
+                elif values.get(UIField.MUMU_EMULATOR_TOGGLE.value):
+                    saved_emulator = EmulatorType.MUMU
                 elif values.get(UIField.MEMU_EMULATOR_TOGGLE.value):
                     saved_emulator = EmulatorType.MEMU
             # Use saved choice if available on this platform, otherwise fallback
@@ -338,6 +360,15 @@ class PyClashBotUI(ttk.Window):
         if UIField.RECORD_FIGHTS_TOGGLE.value in values:
             self.record_fights_var.set(bool(values[UIField.RECORD_FIGHTS_TOGGLE.value]))
 
+        if UIField.MUMU_INSTANCE_INDEX.value in values:
+            self.mumu_instance_var.set(str(values[UIField.MUMU_INSTANCE_INDEX.value]))
+
+        for field, var in self.session_vars.items():
+            if field.value not in values:
+                continue
+            raw = values[field.value]
+            var.set(bool(raw) if field in _SESSION_BOOL_FIELDS else str(raw))
+
         if UIField.RECORDING_FOLDER_PATH.value in values:
             saved_path = str(values[UIField.RECORDING_FOLDER_PATH.value])
             # An empty saved value means "default" -- show the resolved default path.
@@ -350,8 +381,11 @@ class PyClashBotUI(ttk.Window):
         self._button_state = state
         if state == "idle":
             self._sync_start_button_readiness()
+            self.pause_btn.grid_remove()
+            self.set_paused(False)
         elif state == "running":
             self.main_btn.configure(text="Stop", bootstyle="danger", state=tk.NORMAL)
+            self.pause_btn.grid()
 
         # Disable/enable config widgets based on running state
         running = state == "running"
@@ -467,16 +501,19 @@ class PyClashBotUI(ttk.Window):
         self.jobs_tab = ttk.Frame(self.notebook)
         self.emulator_tab = ttk.Frame(self.notebook)
         self.stats_tab = ttk.Frame(self.notebook)
+        self.session_tab = ttk.Frame(self.notebook)
         self.misc_tab = ttk.Frame(self.notebook)
 
         self.notebook.add(self.jobs_tab, text="Jobs")
         self.notebook.add(self.emulator_tab, text="Emulator")
         self.notebook.add(self.stats_tab, text="Stats")
+        self.notebook.add(self.session_tab, text="Session")
         self.notebook.add(self.misc_tab, text="Misc")
 
         self._create_jobs_tab()
         self._create_emulator_tab()
         self._create_stats_tab()
+        self._create_session_tab()
         self._create_misc_tab()
         self.after_idle(self._sync_notebook_tab_widths)
 
@@ -624,6 +661,14 @@ class PyClashBotUI(ttk.Window):
         self.main_btn = ttk.Button(self._main_btn_row, text="Start", bootstyle="success")
         self.main_btn.grid(row=0, column=1, ipadx=ipadx, ipady=ipady)
         self._register_config_widget("main_btn", self.main_btn)
+
+        # Pause/Resume is only visible while the bot runs; __main__ wires its command.
+        self.pause_btn = ttk.Button(self._main_btn_row, text="Pause", bootstyle="warning-outline")
+        self.pause_btn.grid(row=0, column=2, sticky="w", padx=(8, 0), ipady=ipady)
+        self.pause_btn.grid_remove()
+
+    def set_paused(self, paused: bool) -> None:
+        self.pause_btn.configure(text="Resume" if paused else "Pause")
 
     def _create_jobs_tab(self) -> None:
         content = self._prepare_tab_page(self.jobs_tab)
@@ -870,6 +915,7 @@ class PyClashBotUI(ttk.Window):
         self.memu_frame = ttk.Frame(self.settings_container)
         self.bluestacks_frame = ttk.Frame(self.settings_container)
         self.adb_frame = ttk.Frame(self.settings_container)
+        self.mumu_frame = ttk.Frame(self.settings_container)
 
         # Store frames in a dictionary for easy access
         self.emulator_settings_frames = {
@@ -877,6 +923,7 @@ class PyClashBotUI(ttk.Window):
             EmulatorType.GOOGLE_PLAY: self.google_play_frame,
             EmulatorType.BLUESTACKS: self.bluestacks_frame,
             EmulatorType.ADB: self.adb_frame,
+            EmulatorType.MUMU: self.mumu_frame,
         }
 
         # Populate the settings frames
@@ -885,6 +932,7 @@ class PyClashBotUI(ttk.Window):
         self._create_memu_settings(self.memu_frame)
         self._create_bluestacks_settings(self.bluestacks_frame)
         self._create_adb_tab(self.adb_frame)
+        self._create_mumu_settings(self.mumu_frame)
 
         # Show the initial settings based on the default value
         self._show_current_emulator_settings()
@@ -1046,6 +1094,108 @@ class PyClashBotUI(ttk.Window):
 
         ToolTip(self.adb_set_size_btn, "Set the emulator screen to 419x633 and density to 160.")
         ToolTip(self.adb_reset_size_btn, "Reset the emulator screen size and density to device defaults.")
+
+    def _create_mumu_settings(self, parent_frame: ttk.Frame) -> None:
+        frame = self._section_labelframe(parent_frame, "MuMu Player 12")
+        frame.pack(fill=X, pady=(0, 6))
+        row = ttk.Frame(frame)
+        row.pack(fill=X)
+        ttk.Label(row, text="Instance index:").pack(side=LEFT, padx=(0, 5))
+        self.mumu_instance_var = ttk.StringVar(value="0")
+        spin = ttk.Spinbox(row, from_=0, to=31, width=5, textvariable=self.mumu_instance_var, state=READONLY)
+        spin.pack(side=LEFT)
+        self._trace_variable(self.mumu_instance_var)
+        self._register_config_widget(UIField.MUMU_INSTANCE_INDEX.value, spin)
+        ToolTip(spin, "MuMu Multi-Instance index to run (0 is the default instance).")
+
+    def _session_spinbox(self, parent: tk.Misc, field: UIField, label: str, to: int, tooltip: str) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill=X, pady=(0, 4))
+        ttk.Label(row, text=label).pack(side=LEFT)
+        var = ttk.StringVar(value=str(SESSION_SETTING_DEFAULTS[field]))
+        spin = ttk.Spinbox(row, from_=0, to=to, width=6, textvariable=var, state=READONLY)
+        spin.pack(side=LEFT, padx=(6, 0))
+        self.session_vars[field] = var
+        self._trace_variable(var)
+        self._register_config_widget(field.value, spin)
+        ToolTip(spin, tooltip)
+
+    def _session_toggle(self, parent: tk.Misc, field: UIField, text: str) -> None:
+        var = ttk.BooleanVar(value=bool(SESSION_SETTING_DEFAULTS[field]))
+        toggle = ttk.Checkbutton(parent, text=text, variable=var, bootstyle="round-toggle")
+        toggle.pack(anchor="w", pady=(0, 4))
+        self.session_vars[field] = var
+        self._trace_variable(var)
+        self._register_config_widget(field.value, toggle)
+
+    def _create_session_tab(self) -> None:
+        content = self._prepare_tab_page(self.session_tab)
+
+        startup = self._section_labelframe(content, "Startup")
+        startup.pack(fill=X, pady=(0, 6))
+        self._session_spinbox(
+            startup,
+            UIField.STARTUP_DELAY_SECONDS,
+            "Wait before launching (seconds):",
+            3600,
+            "Gives you time to start a VPN or network accelerator before the emulator boots.",
+        )
+
+        limits = self._section_labelframe(content, "Limits (0 = no limit)")
+        limits.pack(fill=X, pady=(0, 6))
+        self._session_spinbox(
+            limits,
+            UIField.MAX_BATTLES_PER_SESSION,
+            "Stop after battles:",
+            10000,
+            "Stop the bot after this many battles across all modes.",
+        )
+        self._session_spinbox(
+            limits,
+            UIField.MAX_SESSION_MINUTES,
+            "Stop after minutes:",
+            10080,
+            "Stop the bot after it has run this many minutes.",
+        )
+
+        schedule = self._section_labelframe(content, "Schedule")
+        schedule.pack(fill=X, pady=(0, 6))
+        self._session_toggle(schedule, UIField.SCHEDULE_TOGGLE, "Only run during active hours")
+        hours = ttk.Frame(schedule)
+        hours.pack(fill=X)
+        for field, label in ((UIField.ACTIVE_START_HOUR, "From"), (UIField.ACTIVE_END_HOUR, "until")):
+            ttk.Label(hours, text=f"{label}:").pack(side=LEFT, padx=(0, 4))
+            var = ttk.StringVar(value=str(SESSION_SETTING_DEFAULTS[field]))
+            top = 23 if field == UIField.ACTIVE_START_HOUR else 24
+            spin = ttk.Spinbox(hours, from_=0, to=top, width=4, textvariable=var, state=READONLY)
+            spin.pack(side=LEFT, padx=(0, 10))
+            self.session_vars[field] = var
+            self._trace_variable(var)
+            self._register_config_widget(field.value, spin)
+        ttk.Label(hours, text="(24h, local time)", font=("TkDefaultFont", 8), bootstyle="secondary").pack(side=LEFT)
+
+        webhook = self._section_labelframe(content, "Discord notifications")
+        webhook.pack(fill=X)
+        self._session_toggle(webhook, UIField.DISCORD_WEBHOOK_TOGGLE, "Post session start/end summaries")
+        url_row = ttk.Frame(webhook)
+        url_row.pack(fill=X)
+        ttk.Label(url_row, text="Webhook URL:").pack(side=LEFT, padx=(0, 5))
+        url_var = ttk.StringVar(value="")
+        url_entry = ttk.Entry(url_row, textvariable=url_var, show="*")
+        url_entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        self.session_vars[UIField.DISCORD_WEBHOOK_URL] = url_var
+        self._trace_variable(url_var)
+        self._register_config_widget(UIField.DISCORD_WEBHOOK_URL.value, url_entry)
+        self.test_webhook_btn = ttk.Button(
+            url_row, text="Test", width=6, bootstyle="secondary", command=self._on_test_webhook_clicked
+        )
+        self.test_webhook_btn.pack(side=LEFT)
+        self._register_config_widget("test_webhook_btn", self.test_webhook_btn)
+        ToolTip(url_entry, "Discord channel > Edit Channel > Integrations > Webhooks > Copy Webhook URL.")
+
+    def _on_test_webhook_clicked(self) -> None:
+        if self._test_webhook_callback is not None:
+            self._test_webhook_callback(str(self.session_vars[UIField.DISCORD_WEBHOOK_URL].get()).strip())
 
     def _create_stats_tab(self) -> None:
         content = self._prepare_tab_page(self.stats_tab)
@@ -1542,7 +1692,12 @@ class PyClashBotUI(ttk.Window):
 
         frame_to_show = self.emulator_settings_frames.get(selected_emulator)
         should_show = True
-        if selected_emulator in {EmulatorType.MEMU, EmulatorType.BLUESTACKS, EmulatorType.GOOGLE_PLAY}:
+        if selected_emulator in {
+            EmulatorType.MEMU,
+            EmulatorType.BLUESTACKS,
+            EmulatorType.GOOGLE_PLAY,
+            EmulatorType.MUMU,
+        }:
             should_show = show_advanced
 
         if frame_to_show and should_show:

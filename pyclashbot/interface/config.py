@@ -223,6 +223,7 @@ EMULATOR_CHOICE = [
     RadioConfig(UIField.MEMU_EMULATOR_TOGGLE, "MEmu", "emulator_type_radio", default=True),
     RadioConfig(UIField.GOOGLE_PLAY_EMULATOR_TOGGLE, "Google Play Games", "emulator_type_radio"),
     RadioConfig(UIField.BLUESTACKS_EMULATOR_TOGGLE, "BlueStacks 5", "emulator_type_radio"),
+    RadioConfig(UIField.MUMU_EMULATOR_TOGGLE, "MuMu Player 12", "emulator_type_radio"),
 ]
 
 # Google Play Settings Configuration
@@ -251,6 +252,20 @@ BLUESTACKS_DEVICE_CONFIG = ComboConfig(
 )
 
 
+# Session tab: pacing, schedule and notifications
+SESSION_SETTING_DEFAULTS: dict[UIField, object] = {
+    UIField.STARTUP_DELAY_SECONDS: 0,
+    UIField.MAX_BATTLES_PER_SESSION: 0,
+    UIField.MAX_SESSION_MINUTES: 0,
+    UIField.SCHEDULE_TOGGLE: False,
+    UIField.ACTIVE_START_HOUR: 9,
+    UIField.ACTIVE_END_HOUR: 23,
+    UIField.DISCORD_WEBHOOK_TOGGLE: False,
+    UIField.DISCORD_WEBHOOK_URL: "",
+}
+SESSION_SETTING_FIELDS: tuple[UIField, ...] = tuple(SESSION_SETTING_DEFAULTS)
+
+
 def _job_setting_keys() -> list[str]:
     keys: list[str] = []
     for job in JOBS:
@@ -271,6 +286,8 @@ USER_CONFIG_KEYS = (
         UIField.RECORDING_FOLDER_PATH.value,
     ]  # Data settings
     + [UIField.GP_DEVICE_SERIAL.value, UIField.BS_DEVICE_SERIAL.value]  # Device serial settings
+    + [field.value for field in SESSION_SETTING_FIELDS]
+    + [UIField.MUMU_INSTANCE_INDEX.value]
 )
 
 # Keys to disable when bot is running
