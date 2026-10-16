@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import sys
 import threading
 import tkinter as tk
@@ -1742,7 +1743,10 @@ class PyClashBotUI(ttk.Window):
             except OSError:
                 return
             gb = total / (1024**3)
-            self.after(0, lambda: self._set_recordings_size_text(gb))
+            # Tk raises if the main loop isn't running yet (startup) or is gone (shutdown);
+            # the periodic refresh fills the label in on its next tick.
+            with contextlib.suppress(RuntimeError):
+                self.after(0, lambda: self._set_recordings_size_text(gb))
 
         threading.Thread(target=worker, daemon=True).start()
 
