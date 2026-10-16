@@ -26,6 +26,7 @@ from pyclashbot.bot.nav import (
     check_for_in_battle_with_delay,
     get_to_activity_log,
     get_to_main_after_fight,
+    select_mode,
     wait_for_battle_start,
     wait_for_clash_main_menu,
 )
@@ -38,6 +39,7 @@ from pyclashbot.bot.recorder import (
 )
 from pyclashbot.bot.state_detect import (
     check_if_battle_has_ended,
+    check_if_battle_mode_is_selected,
     check_if_in_battle,
     check_if_on_clash_main_menu,
     check_pixels_for_win_in_battle_log,
@@ -113,6 +115,17 @@ def do_fight_state(
     return True
 
 
+def ensure_battle_mode_selected(emulator, logger, mode) -> bool:
+    """Confirm ``mode`` is the selected battle mode, re-selecting it once if not."""
+    if check_if_battle_mode_is_selected(emulator, mode):
+        return True
+    logger.change_status(f"{mode} is not the selected battle mode, re-selecting it")
+    if select_mode(emulator, mode, logger) and check_if_battle_mode_is_selected(emulator, mode):
+        return True
+    logger.change_status(f"Could not confirm {mode} is selected — not starting the fight")
+    return False
+
+
 def start_fight(emulator, logger, mode) -> bool:
     """Start a fight with the specified mode.
 
@@ -142,8 +155,11 @@ def start_fight(emulator, logger, mode) -> bool:
         logger.change_status("Not on main menu — cannot start fight")
         return False
 
-    # For all modes (1v1 and 2v2), use the same start button
-    # Mode is already set by select_mode() in states.py, just click start button
+    # Seasonal event modes (e.g. Road to Ronin, #744) can take over the battle
+    # button after launch. Never press Start unless our mode is the selected one.
+    if not ensure_battle_mode_selected(emulator, logger, mode):
+        return False
+
     emulator.click(START_FIGHT_BUTTON_COORD[0], START_FIGHT_BUTTON_COORD[1])
     logger.log(f"Clicked Start button at {START_FIGHT_BUTTON_COORD}")
 
