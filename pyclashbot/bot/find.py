@@ -13,6 +13,7 @@ import numpy as np
 
 from pyclashbot.bot.coords import (
     ENEMY_TOWER_HP_BARS,
+    ENEMY_UNIT_CROP_OFFSETS_LTRB,
     ENEMY_UNIT_SCAN_REGION_LTRB,
     FRIENDLY_UNIT_SCAN_REGION_LTRB,
     LANE_SPLIT_X,
@@ -143,6 +144,8 @@ class EnemyUnit:
     x: int
     y: int
     size: int  # marker pixel count — a rough proxy for how big/healthy the unit is
+    # What the unit is (a card id or a coarse unit_classifier category), once recognized.
+    kind: str | None = None
 
     @property
     def lane(self) -> str:
@@ -170,6 +173,20 @@ def find_enemy_units(iar: np.ndarray | None) -> list[EnemyUnit]:
         if stats[i][cv2.CC_STAT_AREA] >= _MIN_ENEMY_MARKER_AREA
     ]
     return sorted(units, key=lambda u: u.y, reverse=True)
+
+
+def crop_unit(iar: np.ndarray | None, unit: EnemyUnit) -> np.ndarray | None:
+    """Fixed-size BGR crop around a detected unit (badge + body), edge-padded at the screen border.
+
+    Always the same shape so crops from anywhere on the board are comparable.
+    """
+    if iar is None:
+        return None
+    dl, dt, dr, db = ENEMY_UNIT_CROP_OFFSETS_LTRB
+    pad = max(-dl, -dt, dr, db)
+    padded = cv2.copyMakeBorder(iar, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+    x, y = unit.x + pad, unit.y + pad
+    return padded[y + dt : y + db, x + dl : x + dr].copy()
 
 
 # HP-bar fill colors (BGR) for princess towers: enemy pink-red, ours light blue.

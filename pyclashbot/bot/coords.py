@@ -197,3 +197,6 @@ OPENING_BACK_COORDS = {"left": (115, 450), "right": (303, 450)}
 FRIENDLY_UNIT_SCAN_REGION_LTRB = (15, 60, 404, 485)
 # Behind our king tower's corners — where beatdown tanks start a push.
 BACK_TANK_COORDS = {"left": (150, 458), "right": (268, 458)}
+# Box around an EnemyUnit point (offsets L, T, R, B) cropped for unit-type recognition:
+# the point sits just under the level badge, the body hangs below it.
+ENEMY_UNIT_CROP_OFFSETS_LTRB = (-36, -28, 36, 44)

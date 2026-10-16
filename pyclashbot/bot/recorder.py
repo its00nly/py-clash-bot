@@ -8,6 +8,9 @@ royalestrat ``user_data`` importer):
        --- or, when cv2's FFV1 crops odd dims / subsamples chroma (the common case): ---
       frames/000000.png ...  # lossless PNG, 419x633, BGR, 3 fps         (fallback)
       plays.jsonl            # one JSON line per deploy: {frame_index, card_index (hand slot 0-3), x, y, elapsed_s}
+      units.jsonl            # one JSON line per enemy unit seen on our half (unit-recognition dataset)
+      units/<snap>_<i>.png   # fixed-size BGR crop around that unit (find.crop_unit)
+      units/frames/<snap>.png  # the exact frame the crops came from
       manifest.json
 
 The frame size 419x633 is odd on both axes; cv2.VideoWriter's FFV1 defaults to a
@@ -37,6 +40,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from pyclashbot.bot.find import EnemyUnit, crop_unit
 from pyclashbot.utils.platform import get_recordings_dir
 
 # Fixed capture geometry (absolute emulator resolution). VideoWriter wants (w, h);
@@ -53,6 +57,10 @@ SCHEMA = "pcb-pack/v1"
 # (gbrp) round-trips bit-exact; yuv444p adds a few counts of matrix rounding;
 # yuv420p chroma subsampling blows past this on the red/blue probe pattern.
 FFV1_COLOR_TOLERANCE = 4
+# Enemy-unit snapshots (crops + their frame) for the unit-recognition dataset: at most
+# one per interval, capped per fight so a long overtime doesn't fill the disk.
+UNIT_SNAPSHOT_INTERVAL_S = 1.0
+MAX_UNIT_SNAPSHOTS = 200
 
 
 def _new_slug() -> str:
@@ -83,6 +91,8 @@ class FightPackRecorder:
         self._thread: threading.Thread | None = None
         self._started_wall: float = 0.0
         self._capture_stopped: float = 0.0
+        self._unit_snapshots: int = 0
+        self._last_unit_snapshot: float = -1e9
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -101,6 +111,8 @@ class FightPackRecorder:
         self._emulator = emulator
         self._frame_count = 0
         self._plays = []
+        self._unit_snapshots = 0
+        self._last_unit_snapshot = -1e9
         self._stop.clear()
         self._started_wall = time.time()
 
@@ -132,6 +144,52 @@ class FightPackRecorder:
         }
         with self._lock:
             self._plays.append(entry)
+
+    def log_units(self, frame: np.ndarray | None, units: list[EnemyUnit], elapsed_s: float | None = None) -> int:
+        """Save a crop of every detected enemy unit plus the frame they came from.
+
+        Throttled to one snapshot per ``UNIT_SNAPSHOT_INTERVAL_S`` and ``MAX_UNIT_SNAPSHOTS``
+        per fight. Each unit gets a ``units.jsonl`` line (appended right away, so a crash
+        keeps what was captured) with ``label: null`` for a human to fill in, and ``kind``
+        holding whatever the live classifier guessed. Returns the number of crops written.
+        """
+        if self.dir is None or frame is None or not units or self._stop.is_set():
+            return 0
+        now = time.time()
+        if now - self._last_unit_snapshot < UNIT_SNAPSHOT_INTERVAL_S or self._unit_snapshots >= MAX_UNIT_SNAPSHOTS:
+            return 0
+        self._last_unit_snapshot = now
+        snap = f"{self._unit_snapshots:04d}"
+        frames_dir = os.path.join(self.dir, "units", "frames")
+        os.makedirs(frames_dir, exist_ok=True)
+        frame_rel = f"units/frames/{snap}.png"
+        cv2.imwrite(os.path.join(self.dir, frame_rel), frame)
+        lines = []
+        for i, unit in enumerate(units):
+            crop = crop_unit(frame, unit)
+            if crop is None:
+                continue
+            crop_rel = f"units/{snap}_{i}.png"
+            cv2.imwrite(os.path.join(self.dir, crop_rel), crop)
+            entry = {
+                "snapshot": self._unit_snapshots,
+                "frame_index": self._frame_count,
+                "elapsed_s": None if elapsed_s is None else round(float(elapsed_s), 2),
+                "unit": i,
+                "x": unit.x,
+                "y": unit.y,
+                "size": unit.size,
+                "lane": unit.lane,
+                "kind": unit.kind,
+                "label": None,
+                "crop": crop_rel,
+                "frame": frame_rel,
+            }
+            lines.append(json.dumps(entry) + "\n")
+        with self._lock, open(os.path.join(self.dir, "units.jsonl"), "a", encoding="utf-8") as f:
+            f.writelines(lines)
+        self._unit_snapshots += 1
+        return len(lines)
 
     def stop_capture(self) -> None:
         """Halt frame capture at the battle boundary, before post-fight navigation.
@@ -284,6 +342,7 @@ class FightPackRecorder:
             "frames_source": self.frames_source,
             "n_frames": self._frame_count,
             "n_plays": len(self._plays),
+            "n_unit_snapshots": self._unit_snapshots,
             "pcb_version": self.version,
             "started_wall": self._started_wall,
             "ended_wall": self._capture_stopped,
@@ -349,6 +408,15 @@ def start_fight_recording(
 def log_play(card_index: int, x: int, y: int, elapsed_s: float) -> None:
     if _active is not None:
         _active.log_play(card_index, x, y, elapsed_s)
+
+
+def log_units(frame: np.ndarray | None, units: list[EnemyUnit], elapsed_s: float | None = None) -> None:
+    """Snapshot enemy units into the active fight pack (no-op when not recording)."""
+    if _active is not None:
+        try:
+            _active.log_units(frame, units, elapsed_s)
+        except Exception as e:  # never let dataset capture break a fight
+            _active._log(f"Unit snapshot failed: {e}")
 
 
 def stop_fight_capture() -> None:

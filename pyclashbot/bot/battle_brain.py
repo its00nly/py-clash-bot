@@ -19,6 +19,11 @@ This module plays more like a person:
   elixir is high and get support behind them; counter-pushes follow a good defense.
 * **Memory.** Tracks our own deck and rotation and the opponent's push pattern
   (bridge spam / beatdown / balanced) and adapts reserve and aggression to it.
+* **Knows what it's fighting** (once ``unit_classifier`` has a trained model): air
+  pushes get anti-air defenders, splash troops never get swarm cards thrown at them,
+  tanks get high-DPS answers, and ``OpponentDeck`` remembers the opponent's cards and
+  rough cycle to name their deck (Lumberloon, Hog cycle, Golem...) and punish the
+  window right after their win condition was played.
 
 Pure decision logic over (hand, units, elixir, time) so it is unit-testable offline;
 ``fight.py`` owns the screenshots and clicks.
@@ -44,6 +49,7 @@ from pyclashbot.bot.coords import (
     PLAYABLE_PLAY_REGION_LTRB,
 )
 from pyclashbot.bot.find import EnemyUnit
+from pyclashbot.bot.unit_classifier import CATEGORY_TRAITS, UnitTraits
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -171,6 +177,47 @@ STUN_CARDS = frozenset({"zap", "electro_spirit", "electro_wizard", "electro_drag
 # Tanks worth starting a push with from behind our towers.
 BACK_TANKS = frozenset({"golem", "giant", "lava_hound", "electro_giant", "goblin_giant", "elixir_golem", "rune_giant"})
 
+# ---- what enemy units are (used once unit_classifier recognizes them) ----------
+AIR_UNITS = frozenset(
+    {
+        "baby_dragon", "balloon", "bats", "electro_dragon", "flying_machine", "inferno_dragon", "lava_hound",
+        "lava_pups", "mega_minion", "minion_horde", "minions", "phoenix", "skeleton_dragons",
+    }
+)  # fmt: skip
+SPLASH_UNITS = frozenset(
+    {
+        "baby_dragon", "bomb_tower", "bomber", "bowler", "dark_prince", "electro_dragon", "executioner",
+        "firecracker", "giant_skeleton", "goblin_demolisher", "hunter", "ice_wizard", "magic_archer",
+        "mega_knight", "monk", "princess", "skeleton_dragons", "sparky", "valkyrie", "witch", "wizard",
+    }
+)  # fmt: skip
+TANK_UNITS = frozenset(
+    {
+        "electro_giant", "elixir_golem", "giant", "giant_skeleton", "goblin_giant", "goblinstein", "golem",
+        "lava_hound", "mega_knight", "pekka", "royal_giant", "rune_giant",
+    }
+)  # fmt: skip
+ENEMY_BUILDINGS = BUILDINGS | frozenset(
+    {"bomb_tower", "cannon", "elixir_collector", "goblin_cage", "inferno_tower", "mortar", "tesla", "xbow"}
+)
+# Our defenders that can't hit air — useless against Balloon / Minions / Lava Hound.
+GROUND_ONLY = frozenset(
+    {
+        "bandit", "barb_hut", "barbarians", "battle_healer", "berserker", "bomb_tower", "bomber", "bowler", "cannon",
+        "dark_prince", "elite_barbarians", "fisherman", "giant_skeleton", "goblin_cage", "goblin_demolisher",
+        "goblins", "golden_knight", "guards", "ice_golem", "knight", "lumberjack", "mega_knight", "mighty_miner",
+        "mini_pekka", "monk", "pekka", "prince", "royal_ghost", "royal_recruits", "skeleton_army",
+        "skeleton_king", "skeletons", "tombstone", "valkyrie",
+    }
+)  # fmt: skip
+# High single-target DPS (or a pull building) — what you want on a tank.
+TANK_KILLERS = frozenset(
+    {
+        "cannon", "elite_barbarians", "goblin_cage", "guards", "hunter", "inferno_dragon", "inferno_tower",
+        "lumberjack", "mighty_miner", "mini_pekka", "pekka", "prince", "skeleton_army", "tesla",
+    }
+)  # fmt: skip
+
 _DEFENSE_PRIORITY = (ROLE_TROOP, ROLE_SUPPORT, ROLE_BUILDING, ROLE_SPELL, ROLE_OWN_SIDE_SPELL)
 _OFFENSE_PRIORITY = (ROLE_WIN, ROLE_SUPPORT, ROLE_TROOP)
 # Right after a win condition goes down: back it up instead of stacking another one.
@@ -238,6 +285,37 @@ ARCHETYPE_BALANCED = "balanced"
 ARCHETYPE_PRESSURE = "bridge spam"
 ARCHETYPE_BEATDOWN = "beatdown"
 
+# Named decks from recognized cards: (name, signature cards, how many of them, play style).
+# First match wins, so the more specific signatures come first.
+_CARD_ARCHETYPES: tuple[tuple[str, frozenset[str], int, str], ...] = (
+    ("Lumberloon", frozenset({"balloon", "lumberjack"}), 2, ARCHETYPE_PRESSURE),
+    ("Lava Hound", frozenset({"lava_hound"}), 1, ARCHETYPE_BEATDOWN),
+    ("Golem beatdown", frozenset({"golem", "elixir_golem"}), 1, ARCHETYPE_BEATDOWN),
+    ("Electro Giant", frozenset({"electro_giant"}), 1, ARCHETYPE_BEATDOWN),
+    ("Goblin Giant", frozenset({"goblin_giant"}), 1, ARCHETYPE_BEATDOWN),
+    ("Giant beatdown", frozenset({"giant", "rune_giant"}), 1, ARCHETYPE_BEATDOWN),
+    ("Royal Giant", frozenset({"royal_giant"}), 1, ARCHETYPE_BEATDOWN),
+    ("X-Bow", frozenset({"xbow"}), 1, ARCHETYPE_BALANCED),
+    ("Mortar", frozenset({"mortar"}), 1, ARCHETYPE_BALANCED),
+    ("P.E.K.K.A bridge spam", frozenset({"pekka"}), 1, ARCHETYPE_PRESSURE),
+    ("Bridge spam", frozenset({"battle_ram", "bandit", "ram_rider", "royal_ghost", "dark_prince", "prince",
+                               "elite_barbarians"}), 2, ARCHETYPE_PRESSURE),
+    ("Hog cycle", frozenset({"hog"}), 1, ARCHETYPE_PRESSURE),
+    ("Royal Hogs", frozenset({"royal_hogs"}), 1, ARCHETYPE_PRESSURE),
+    ("Balloon", frozenset({"balloon"}), 1, ARCHETYPE_PRESSURE),
+    ("Miner control", frozenset({"miner"}), 1, ARCHETYPE_PRESSURE),
+    ("Log bait", frozenset({"princess", "goblin_gang", "dart_goblin"}), 2, ARCHETYPE_PRESSURE),
+    ("Mega Knight", frozenset({"mega_knight"}), 1, ARCHETYPE_BALANCED),
+)  # fmt: skip
+# The same card seen again within this long is the same deployment, not a new play.
+SAME_DEPLOY_S = 8.0
+# A played card is back in the opponent's hand after 4 more plays; we miss plays we can't
+# see (spells, troops that stay on their half), so also assume it's back after this long.
+CYCLE_FORGET_S = 20.0
+_CYCLE_DEPTH = 4
+# Their win condition was just played and can't be back yet: a smaller reserve is enough.
+PUNISH_DEFENSE_RESERVE = 2
+
 
 def _base_card_id(card_id: str) -> str:
     for prefix in ("evo_", "hero_"):
@@ -265,6 +343,23 @@ def card_role(card_id: str | None) -> str:
     if group in _SUPPORT_GROUPS:
         return ROLE_SUPPORT
     return ROLE_TROOP
+
+
+def unit_traits(kind: str | None) -> UnitTraits | None:
+    """What a recognized enemy unit is (``kind`` = card id or coarse category), or None if unknown."""
+    if not kind:
+        return None
+    if kind in CATEGORY_TRAITS:
+        return CATEGORY_TRAITS[kind]
+    base = _base_card_id(kind)
+    return UnitTraits(
+        air=base in AIR_UNITS,
+        swarm=base in SWARM_CARDS,
+        tank=base in TANK_UNITS,
+        splash=base in SPLASH_UNITS,
+        building=base in ENEMY_BUILDINGS,
+        win_condition=base in WIN_CONDITIONS,
+    )
 
 
 def card_cost(card_id: str | None) -> int:
@@ -334,10 +429,26 @@ class EnemyPush:
     center: tuple[int, int]
     count: int
     handled: bool  # one of our troops is already fighting it
+    kinds: tuple[str, ...] = ()  # recognized unit types in the push (unit_classifier)
+
+    def _traits(self) -> list[UnitTraits]:
+        return [t for t in map(unit_traits, self.kinds) if t is not None]
 
     @property
     def swarm(self) -> bool:
-        return self.count >= _SWARM_COUNT
+        return self.count >= _SWARM_COUNT or any(t.swarm for t in self._traits())
+
+    @property
+    def air(self) -> bool:
+        return any(t.air for t in self._traits())
+
+    @property
+    def splash(self) -> bool:
+        return any(t.splash for t in self._traits())
+
+    @property
+    def tank(self) -> bool:
+        return any(t.tank for t in self._traits())
 
 
 def summarize_pushes(threats: Sequence[EnemyUnit], friends: Sequence[EnemyUnit] = ()) -> dict[str, EnemyPush]:
@@ -350,7 +461,8 @@ def summarize_pushes(threats: Sequence[EnemyUnit], friends: Sequence[EnemyUnit] 
         group = [u for u in units if abs(u.x - lead.x) <= _PUSH_RADIUS and abs(u.y - lead.y) <= _PUSH_RADIUS]
         center = (sum(u.x for u in group) // len(group), sum(u.y for u in group) // len(group))
         handled = any(abs(f.x - lead.x) <= _HANDLED_RADIUS and abs(f.y - lead.y) <= _HANDLED_RADIUS for f in friends)
-        pushes[lane] = EnemyPush(lane, lead, center, len(group), handled)
+        kinds = tuple(dict.fromkeys(u.kind for u in group if u.kind))
+        pushes[lane] = EnemyPush(lane, lead, center, len(group), handled, kinds)
     return pushes
 
 
@@ -385,22 +497,94 @@ class DeckTracker:
         return [c for c in self.deck if card_role(c) == ROLE_WIN]
 
 
+class OpponentDeck:
+    """The opponent's cards as recognized on our half, and an estimate of their cycle.
+
+    Clash Royale sends a played card to the back of a 4-card queue, so a card is out of
+    the opponent's hand until 4 more plays happen. We only see troops that cross onto
+    our half (no spells, nothing that stays on their side), so the play log undercounts;
+    ``CYCLE_FORGET_S`` caps how long a card is assumed to be out.
+    """
+
+    def __init__(self, clock) -> None:
+        self._clock = clock
+        self.cards: list[str] = []  # first-seen order, at most 8
+        self.plays: list[tuple[float, str]] = []  # (time, card), oldest first
+        self._last_seen: dict[str, float] = {}
+
+    def observe(self, units: Sequence[EnemyUnit]) -> None:
+        now = self._clock()
+        for kind in dict.fromkeys(u.kind for u in units if u.kind):
+            if kind in CATEGORY_TRAITS:
+                continue  # a coarse category isn't a card
+            if now - self._last_seen.get(kind, -1e9) > SAME_DEPLOY_S:
+                self.plays.append((now, kind))
+                if kind not in self.cards and len(self.cards) < 8:
+                    self.cards.append(kind)
+            self._last_seen[kind] = now
+
+    def ready(self, card: str) -> bool | None:
+        """Could ``card`` be in the opponent's hand? None if we've never seen it."""
+        if card not in self.cards:
+            return None
+        now = self._clock()
+        recent = self.plays[-_CYCLE_DEPTH:]
+        return not any(c == card and now - t < CYCLE_FORGET_S for t, c in recent)
+
+    def likely_hand(self) -> list[str] | None:
+        """With all 8 cards known: the ones that could be in hand right now."""
+        if len(self.cards) < 8:
+            return None
+        return [c for c in self.cards if self.ready(c)]
+
+    def known(self, group: frozenset[str]) -> list[str]:
+        return [c for c in self.cards if _base_card_id(c) in group]
+
+    def any_ready(self, group: frozenset[str]) -> bool:
+        return any(self.ready(c) for c in self.known(group))
+
+    def win_condition_out_of_cycle(self) -> bool:
+        """Their known win conditions were all just played — a window to push."""
+        wins = self.known(WIN_CONDITIONS)
+        return bool(wins) and not any(self.ready(c) for c in wins)
+
+    def named_archetype(self) -> tuple[str, str] | None:
+        """(deck name, play style) from the recognized cards, or None."""
+        bases = {_base_card_id(c) for c in self.cards}
+        for name, signature, needed, style in _CARD_ARCHETYPES:
+            if len(bases & signature) >= needed:
+                return name, style
+        return None
+
+
 class OpponentModel:
-    """What the opponent does: how often and how big they push, and where."""
+    """What the opponent does: how often and how big they push, where, and with which cards."""
 
     def __init__(self, clock) -> None:
         self._clock = clock
         self.pushes: list[tuple[float, str, int]] = []  # time, lane, unit count
         self._last_seen: dict[str, float] = {}
+        self.deck = OpponentDeck(clock)
 
-    def observe(self, pushes: Mapping[str, EnemyPush]) -> None:
+    def observe(self, pushes: Mapping[str, EnemyPush], units: Sequence[EnemyUnit] = ()) -> None:
         now = self._clock()
         for lane, push in pushes.items():
             if now - self._last_seen.get(lane, -1e9) > _PUSH_GAP_S:
                 self.pushes.append((now, lane, push.count))
             self._last_seen[lane] = now
+        self.deck.observe(units)
 
     def archetype(self) -> str:
+        """Deck name when the cards give it away (Lumberloon, Hog cycle...), else the push-pattern style."""
+        named = self.deck.named_archetype()
+        return named[0] if named else self._pattern()
+
+    def style(self) -> str:
+        """bridge spam / beatdown / balanced — what the reserve and back-tank logic react to."""
+        named = self.deck.named_archetype()
+        return named[1] if named else self._pattern()
+
+    def _pattern(self) -> str:
         now = self._clock()
         recent = [p for p in self.pushes if now - p[0] <= _PATTERN_WINDOW_S]
         if len(recent) >= 4 and sum(p[2] for p in recent) / len(recent) <= 2.0:
@@ -516,7 +700,9 @@ class BattleBrain:
 
     def reserve(self) -> int:
         """Elixir to keep for defense after an offensive play."""
-        return PRESSURE_DEFENSE_RESERVE if self.opponent.archetype() == ARCHETYPE_PRESSURE else DEFENSE_RESERVE
+        if self.opponent.deck.win_condition_out_of_cycle():
+            return PUNISH_DEFENSE_RESERVE
+        return PRESSURE_DEFENSE_RESERVE if self.opponent.style() == ARCHETYPE_PRESSURE else DEFENSE_RESERVE
 
     def should_defend_now(self, threats: Sequence[EnemyUnit], friends: Sequence[EnemyUnit] = ()) -> EnemyUnit | None:
         """Return the threat to answer immediately, or None if it's already handled.
@@ -557,7 +743,7 @@ class BattleBrain:
         whether elixir is full.
         """
         pushes = summarize_pushes(threats, friends)
-        self.opponent.observe(pushes)
+        self.opponent.observe(pushes, threats)
         self.deck.observe_hand(list(hand.values()))
         if elixir is not None and elixir >= 10:
             elixir_full = True
@@ -646,11 +832,19 @@ class BattleBrain:
                 return play(card, defensive_drop(card[2], center, card[1]), f"spelling the swarm in the {lane} lane")
 
         # 3. Cheapest troop/building that handles it. Swarm cards stay out of multi-unit pushes
-        #    (Bowler/Valkyrie/Wizard splash wipes them).
+        #    and away from splash (Bowler/Valkyrie/Wizard wipes them) — also when a splash card
+        #    of theirs we've seen could be back in hand.
         target = 3 if push.count == 1 else 4 if push.count == 2 else 5
         defenders = [c for c in cards if c[2] in (ROLE_TROOP, ROLE_SUPPORT, ROLE_BUILDING)]
-        if push.count >= 2:
+        if push.air:
+            # Ground-only defenders can't touch Balloon/Minions; with no anti-air, fall through to spells.
+            defenders = [c for c in defenders if not _is(c[1], GROUND_ONLY)]
+        if push.count >= 2 or push.splash or self.opponent.deck.any_ready(SPLASH_UNITS):
             defenders = [c for c in defenders if not _is(c[1], SWARM_CARDS)] or defenders
+        if push.tank:
+            killers = [c for c in defenders if _is(c[1], TANK_KILLERS) or c[2] == ROLE_BUILDING]
+            if killers:
+                defenders, target = killers, 5
         if defenders:
             card = self._cheapest(defenders, target)
             return play(card, defensive_drop(card[2], threat, card[1]), f"defending the {lane} lane")
@@ -683,7 +877,7 @@ class BattleBrain:
         tanks = [c for c in cards if _is(c[1], BACK_TANKS)]
         if not tanks or elixir is None:
             return None
-        if self.opponent.archetype() == ARCHETYPE_PRESSURE and not elixir_full:
+        if self.opponent.style() == ARCHETYPE_PRESSURE and not elixir_full:
             return None  # a slow push at the back gets punished by bridge spam in the other lane
         if not elixir_full and elixir < max(BACK_TANK_MIN_ELIXIR, *(card_cost(c[1]) for c in tanks)):
             return None
@@ -739,7 +933,12 @@ class BattleBrain:
             parts.append(f"enemy {kind} {lane}{' (ours on it)' if push.handled else ''}")
         if not pushes:
             parts.append("no enemies on our side")
+        for lane, push in pushes.items():
+            if push.kinds:
+                parts.append(f"{lane}: {', '.join(push.kinds)}")
         parts.append(f"opponent: {self.opponent.archetype()}")
+        if self.opponent.deck.cards:
+            parts.append(f"seen {len(self.opponent.deck.cards)}/8 of their cards")
         return " · ".join(parts)
 
     def record(self, play: Play) -> None:

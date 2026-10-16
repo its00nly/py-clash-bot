@@ -38,6 +38,7 @@ from pyclashbot.bot.recorder import (
     finish_fight_recording,
     is_recording,
     log_play,
+    log_units,
     start_fight_recording,
     stop_fight_capture,
 )
@@ -50,6 +51,7 @@ from pyclashbot.bot.state_detect import (
     count_elixir,
     read_elixir,
 )
+from pyclashbot.bot.unit_classifier import classify_units
 from pyclashbot.utils.logger import Logger
 from pyclashbot.utils.versioning import __version__
 
@@ -257,7 +259,10 @@ def wait_for_elixir(
         card_indices = check_which_cards_are_available(emulator)
         if brain is not None and card_indices:
             iar = card_detection.battle_iar
-            threat = brain.should_defend_now(find_enemy_units(iar), find_friendly_units(iar))
+            enemies = find_enemy_units(iar)
+            if recording_flag:
+                log_units(iar, enemies)
+            threat = brain.should_defend_now(enemies, find_friendly_units(iar))
             if threat is not None:
                 logger.change_status(f"Enemy push in the {threat.lane} lane — defending now")
                 return True
@@ -502,10 +507,12 @@ def play_smart_card(
 
     iar = card_detection.battle_iar
     hand = {index: identify_hand_cards(emulator, index) for index in card_indices}
-    threats = find_enemy_units(iar)
+    threats = classify_units(iar, find_enemy_units(iar))
     friends = find_friendly_units(iar)
     brain.observe_towers(read_tower_health(iar))
     elapsed = battle_strategy.get_elapsed_time()
+    if recording_flag:
+        log_units(iar, threats, elapsed)
     elixir = read_elixir(iar) if iar is not None else None
     play = brain.choose(hand, threats, elapsed, elixir=elixir, friends=friends)
     if play is None:
