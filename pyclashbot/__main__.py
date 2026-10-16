@@ -51,6 +51,7 @@ from pyclashbot.interface.ui import PyClashBotUI, no_jobs_popup
 from pyclashbot.utils.caching import USER_SETTINGS_CACHE
 from pyclashbot.utils.cli_config import arg_parser
 from pyclashbot.utils.discord_rpc import DiscordRPCManager
+from pyclashbot.utils.discord_webhook import build_session_embed, is_valid_webhook_url, post_webhook_async
 from pyclashbot.utils.logger import Logger, initialize_pylogging, log_dir, log_name
 from pyclashbot.utils.open_folder import open_folder
 from pyclashbot.utils.platform import get_recordings_dir, is_macos
@@ -115,6 +116,13 @@ def make_job_dictionary(values: dict[str, Any]) -> dict[str, Any]:
         UIField.DISABLE_WIN_TRACK_TOGGLE.value: as_bool(UIField.DISABLE_WIN_TRACK_TOGGLE),
         UIField.RECORD_FIGHTS_TOGGLE.value: as_bool(UIField.RECORD_FIGHTS_TOGGLE),
         UIField.RECORDING_FOLDER_PATH.value: as_str(UIField.RECORDING_FOLDER_PATH),
+        # Session pacing (Session tab); 0 means "no limit"
+        UIField.STARTUP_DELAY_SECONDS.value: as_int(UIField.STARTUP_DELAY_SECONDS, 0),
+        UIField.MAX_BATTLES_PER_SESSION.value: as_int(UIField.MAX_BATTLES_PER_SESSION, 0),
+        UIField.MAX_SESSION_MINUTES.value: as_int(UIField.MAX_SESSION_MINUTES, 0),
+        UIField.SCHEDULE_TOGGLE.value: as_bool(UIField.SCHEDULE_TOGGLE),
+        UIField.ACTIVE_START_HOUR.value: as_int(UIField.ACTIVE_START_HOUR, 9),
+        UIField.ACTIVE_END_HOUR.value: as_int(UIField.ACTIVE_END_HOUR, 23),
     }
 
     job_dictionary["upgrade_user_toggle"] = as_bool(UIField.CARD_UPGRADE_USER_TOGGLE)
@@ -146,6 +154,8 @@ def make_job_dictionary(values: dict[str, Any]) -> dict[str, Any]:
         job_dictionary["emulator"] = EmulatorType.BLUESTACKS
     elif values.get(UIField.ADB_TOGGLE.value):
         job_dictionary["emulator"] = EmulatorType.ADB
+    elif values.get(UIField.MUMU_EMULATOR_TOGGLE.value):
+        job_dictionary["emulator"] = EmulatorType.MUMU
     else:
         job_dictionary["emulator"] = EmulatorType.MEMU
 
@@ -154,6 +164,8 @@ def make_job_dictionary(values: dict[str, Any]) -> dict[str, Any]:
 
     gp_serial = values.get(UIField.GP_DEVICE_SERIAL.value)
     job_dictionary[UIField.GP_DEVICE_SERIAL.value] = gp_serial.strip() if gp_serial else None
+
+    job_dictionary[UIField.MUMU_INSTANCE_INDEX.value] = as_int(UIField.MUMU_INSTANCE_INDEX, 0)
 
     bs_serial = values.get(UIField.BS_DEVICE_SERIAL.value)
     job_dictionary[UIField.BS_DEVICE_SERIAL.value] = bs_serial.strip() if bs_serial else None
@@ -188,6 +200,7 @@ def start_button_event(
     values: dict[str, Any],
     stats_queue: Queue,
     shutdown_event: Event,
+    pause_event: Event | None = None,
 ) -> WorkerProcess | None:
     """Start the worker process with the current configuration."""
     job_dictionary = make_job_dictionary(values)
@@ -230,7 +243,7 @@ def start_button_event(
 
     ui.notebook.select(ui.stats_tab)
 
-    process = WorkerProcess(job_dictionary, stats_queue, shutdown_event, log_name)
+    process = WorkerProcess(job_dictionary, stats_queue, shutdown_event, log_name, pause_event)
     process.start()
     return process
 
@@ -296,6 +309,8 @@ class BotApplication:
         self.ui.register_config_callback(self._on_config_change)
         self.ui.register_open_logs_callback(self._on_open_logs_clicked)
         self.ui.register_open_recordings_callback(self._on_open_recordings_clicked)
+        self.ui.register_test_webhook_callback(self._on_test_webhook)
+        self.ui.pause_btn.configure(command=self._on_pause_toggle)
         self.ui.protocol("WM_DELETE_WINDOW", self._on_close)
         self.ui.adb_refresh_btn.configure(command=self._on_adb_refresh)
         self.ui.adb_connect_btn.configure(command=self._on_adb_connect)
@@ -310,7 +325,13 @@ class BotApplication:
         self.process: WorkerProcess | None = None
         self.stats_queue: Queue | None = None
         self.shutdown_event: Event | None = None
+        self.pause_event: Event | None = None
         self.last_stats: dict[str, Any] = {}
+        # Discord webhook: per-session "end" post guard, and the Test button's result
+        # (written by the sender thread, shown by _poll on the Tk thread).
+        self._session_end_pending = False
+        self._last_worker_status: str | None = None
+        self._webhook_test_result: str | None = None
 
         self.logger = Logger(timed=False)
         self.discord_rpc = DiscordRPCManager()
@@ -344,10 +365,13 @@ class BotApplication:
         # Create fresh multiprocessing primitives for each run
         self.stats_queue = mp.Queue(maxsize=100)
         self.shutdown_event = mp.Event()
+        self.pause_event = mp.Event()
         self.last_stats = {}
 
         new_logger = Logger(timed=True)
-        process = start_button_event(new_logger, self.ui, values, self.stats_queue, self.shutdown_event)
+        process = start_button_event(
+            new_logger, self.ui, values, self.stats_queue, self.shutdown_event, self.pause_event
+        )
         if process is not None:
             self.logger = new_logger
             self.process = process
@@ -355,6 +379,9 @@ class BotApplication:
             if self.discord_rpc_enabled:
                 self.discord_rpc.enable()
             self.ui.set_button_state("running")
+            self._post_session_webhook("start")
+            self._session_end_pending = True
+            self._last_worker_status = None
         else:
             self.ui.set_button_state("idle")
 
@@ -363,9 +390,56 @@ class BotApplication:
         self.logger.change_status("Stopping")
         stop_worker_process(self.process, self.shutdown_event)
         self._snapshot_session_stats()
+        self._finish_session_webhook("Stopped from the app")
         self.process = None
         self.logger.change_status("Idle")
         self.ui.set_button_state("idle")
+
+    def _on_pause_toggle(self) -> None:
+        if self.pause_event is None or self.process is None:
+            return
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.ui.set_paused(False)
+            self.logger.change_status("Resuming...")
+        else:
+            self.pause_event.set()
+            self.ui.set_paused(True)
+            self.logger.change_status("Pausing after the current step...")
+
+    def _webhook_url(self) -> str | None:
+        values = self.current_values
+        if not values.get(UIField.DISCORD_WEBHOOK_TOGGLE.value):
+            return None
+        url = str(values.get(UIField.DISCORD_WEBHOOK_URL.value) or "").strip()
+        return url if is_valid_webhook_url(url) else None
+
+    def _post_session_webhook(self, event: str, reason: str | None = None) -> None:
+        url = self._webhook_url()
+        if url is None:
+            return
+        emulator = make_job_dictionary(dict(self.current_values)).get("emulator")
+        stats = self.last_stats if event != "start" else None
+        post_webhook_async(url, build_session_embed(event, stats, reason, str(emulator) if emulator else None))
+
+    def _finish_session_webhook(self, reason: str | None) -> None:
+        if not self._session_end_pending:
+            return
+        self._session_end_pending = False
+        failed = bool(reason) and any(word in str(reason).lower() for word in ("error", "fail", "not ready"))
+        self._post_session_webhook("error" if failed else "end", reason)
+
+    def _on_test_webhook(self, url: str) -> None:
+        if not is_valid_webhook_url(url):
+            self.logger.change_status("That doesn't look like a Discord webhook URL")
+            return
+        self.logger.change_status("Sending a test message to Discord...")
+
+        def done(ok: bool, message: str) -> None:
+            self._webhook_test_result = "Discord webhook works!" if ok else f"Discord webhook failed: {message}"
+
+        payload = build_session_embed("start", None, "Test message from py-clash-bot")
+        post_webhook_async(url, payload, on_done=done)
 
     def _on_config_change(self, values: dict[str, Any]) -> None:
         changed = {key for key, value in values.items() if self.current_values.get(key) != value}
@@ -427,6 +501,8 @@ class BotApplication:
                         # Update local logger with stats from worker process
                         if "current_status" in stats:
                             self.logger.current_status = stats["current_status"]
+                            if stats["current_status"] != "Bot stopped":
+                                self._last_worker_status = str(stats["current_status"])
                         if self.logger.stats is not None:
                             self.logger.stats.update(stats)
             except Exception:
@@ -434,6 +510,11 @@ class BotApplication:
 
         if self.process is not None and not self.process.is_alive():
             self._snapshot_session_stats()
+            self._finish_session_webhook(self._last_worker_status)
+
+        if self._webhook_test_result is not None:
+            self.logger.change_status(self._webhook_test_result)
+            self._webhook_test_result = None
 
         self.process, self.logger = handle_process_finished(self.ui, self.process, self.logger)
         self._update_ui_from_stats()
