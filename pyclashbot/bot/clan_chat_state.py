@@ -312,7 +312,7 @@ def _request_cards_from_picker(emulator, logger) -> bool:
 def _ensure_clan_chat(emulator, logger) -> bool:
     if check_if_on_clan_chat(emulator):
         return True
-    if not check_if_on_clash_main_menu(emulator):
+    if not check_if_on_clash_main_menu(emulator) and not _return_to_main(emulator, logger):
         logger.change_status("Not on main menu — cannot open clan chat")
         return False
     if not navigate_main_page(emulator, logger, PAGE_MAIN, PAGE_CLAN_CHAT):
