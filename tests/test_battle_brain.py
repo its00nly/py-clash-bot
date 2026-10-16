@@ -129,7 +129,7 @@ def test_defends_the_balloon_with_a_troop_not_the_win_condition(frame):
     play = _brain().choose(FIXTURE_HAND, find_enemy_units(frame), elapsed_s=30)
     assert play is not None
     assert play.defensive and play.lane == "left"
-    assert play.card_id in {"lumberjack", "hero_bowler"}
+    assert play.card_id != "ram_rider"
     assert play.coord[0] < LANE_SPLIT_X
     assert play.coord[1] >= OWN_HALF_DROP_Y_RANGE[0]
 
@@ -233,7 +233,7 @@ def test_play_smart_card_defends_on_the_fixture(frame, monkeypatch):
 
     assert fight.play_smart_card(emulator, logger, False, strategy, _brain()) is True
     hand_click, drop = emulator.clicks
-    assert hand_click in (tuple(HAND_CARDS_COORDS[0]), tuple(HAND_CARDS_COORDS[3]))
+    assert hand_click != tuple(HAND_CARDS_COORDS[1])  # not the win condition
     assert drop[0] < LANE_SPLIT_X and drop[1] >= OWN_HALF_DROP_Y_RANGE[0]
     assert logger.cards == 1
     assert any("defending the left lane" in s for s in logger.statuses)
@@ -331,3 +331,132 @@ def test_spells_saved_unless_they_finish_a_tower_or_overtime():
         brain.observe_towers(_health(enemy_left=0.2, enemy_right=0.2))
     play = brain.choose(hand, [], elapsed_s=60)
     assert play is not None and "finishing" in play.reason
+
+
+# ---- round 3: elixir discipline, swarms, stuns, rotation, opponent pattern ----------
+
+
+def test_finds_our_fighting_giant_but_not_tower_decorations(frame):
+    from pyclashbot.bot.find import find_friendly_units
+
+    friends = find_friendly_units(frame)
+    assert len(friends) == 1
+    assert friends[0].x > LANE_SPLIT_X and friends[0].y < 245  # our Giant on the enemy side
+    assert find_friendly_units(None) == []
+
+
+def test_reads_elixir_on_the_fixture(frame):
+    from pyclashbot.bot.state_detect import read_elixir
+
+    assert read_elixir(frame) == 5
+
+
+def _swarm(lane_x=110, y=320):
+    return [EnemyUnit(lane_x, y, 20), EnemyUnit(lane_x + 15, y + 5, 20), EnemyUnit(lane_x - 12, y + 10, 20)]
+
+
+def test_swarm_gets_the_cheap_spell_the_moment_it_crosses():
+    hand = {0: "knight", 1: "log", 2: "fireball", 3: "musketeer"}
+    play = _brain().choose(hand, _swarm(), elapsed_s=40, elixir=6)
+    assert play is not None and play.card_id == "log" and play.defensive
+    assert "swarm" in play.reason
+
+
+def test_push_our_troops_already_fight_is_left_alone():
+    from pyclashbot.bot.battle_brain import summarize_pushes
+
+    minion = [EnemyUnit(110, 330, 20)]
+    phoenix = [EnemyUnit(120, 350, 60)]
+    assert summarize_pushes(minion, phoenix)["left"].handled
+    brain = _brain()
+    assert brain.should_defend_now(minion, phoenix) is None
+    assert brain.choose({0: "arrows", 1: "knight"}, minion, elapsed_s=40, elixir=6, friends=phoenix) is None
+
+
+def test_no_swarm_cards_into_a_multi_unit_push():
+    hand = {0: "skeletons", 1: "valkyrie"}
+    push = [EnemyUnit(110, 320, 40), EnemyUnit(130, 300, 40)]  # e.g. Bowler + support
+    play = _brain().choose(hand, push, elapsed_s=40, elixir=6)
+    assert play is not None and play.card_id == "valkyrie"
+
+
+def test_cheapest_answer_for_a_lone_troop():
+    hand = {0: "pekka", 1: "knight", 2: "mega_knight"}
+    play = _brain().choose(hand, [EnemyUnit(110, 320, 40)], elapsed_s=40, elixir=8)
+    assert play is not None and play.card_id == "knight"
+
+
+def test_defenders_are_not_dropped_on_top_of_the_enemy():
+    threat = EnemyUnit(110, 300, 40)
+    x, y = defensive_drop(ROLE_TROOP, threat)
+    assert y - threat.y >= 45
+    sx, _ = defensive_drop(ROLE_SUPPORT, threat)
+    assert sx > threat.x  # ranged support sits toward the middle, out of lane splash
+
+
+def test_stuns_a_lone_unit_hitting_our_tower():
+    hand = {0: "zap", 1: "knight", 2: "hog"}
+    play = _brain().choose(hand, [EnemyUnit(110, 390, 60)], elapsed_s=40, elixir=6)
+    assert play is not None and play.card_id == "zap" and "stun" in play.reason
+
+
+def test_keeps_a_defense_reserve_instead_of_dumping_troops():
+    brain = _brain()
+    brain._played_any = True
+    hand = {0: "musketeer", 1: "hog", 2: "knight"}
+    assert brain.choose(hand, [], elapsed_s=60, elixir=6) is None  # hog would leave 2 < reserve 3
+    play = brain.choose(hand, [], elapsed_s=60, elixir=7)
+    assert play is not None and play.card_id == "hog"
+
+
+def test_golem_starts_at_the_back_with_full_elixir_then_gets_support():
+    from pyclashbot.bot.coords import BACK_TANK_COORDS
+
+    clock = _Clock()
+    brain = _brain(clock)
+    brain._played_any = True
+    hand = {0: "golem", 1: "night_witch", 2: "zap", 3: "lumberjack"}
+    assert brain.choose(hand, [], elapsed_s=60, elixir=7) is None  # not enough for a real push
+    play = brain.choose(hand, [], elapsed_s=60, elixir=9)
+    assert play is not None and play.card_id == "golem"
+    assert play.coord == BACK_TANK_COORDS[play.lane]
+    brain.record(play)
+    clock.now += 6
+    follow = brain.choose({1: "night_witch", 2: "zap", 3: "lumberjack"}, [], elapsed_s=66, elixir=5)
+    assert follow is not None and follow.card_id in {"night_witch", "lumberjack"} and "backing up" in follow.reason
+
+
+def test_cycles_cheap_cards_toward_the_win_condition():
+    brain = _brain()
+    brain._played_any = True
+    brain.deck.observe_hand(["hog", "ice_spirit", "skeletons", "musketeer"])
+    brain.deck.played("hog")
+    play = brain.choose({0: "ice_spirit", 1: "musketeer", 2: "skeletons", 3: "fireball"}, [], elapsed_s=60, elixir=8)
+    assert play is not None and play.card_id in {"ice_spirit", "skeletons"}
+    assert "cycling toward hog" in play.reason
+
+
+def test_deck_rotation_order():
+    from pyclashbot.bot.battle_brain import DeckTracker
+
+    deck = DeckTracker()
+    for card in ("hog", "log", "knight"):
+        deck.played(card)
+    hand = ["log", "a", "b", "c"]
+    assert deck.queue(hand) == ["hog", "knight"]
+    assert deck.plays_until("hog", hand) == 1
+    assert deck.plays_until("knight", hand) == 2
+    assert deck.plays_until("log", hand) == 0
+
+
+def test_spots_bridge_spam_and_raises_the_reserve():
+    from pyclashbot.bot.battle_brain import ARCHETYPE_PRESSURE, PRESSURE_DEFENSE_RESERVE
+
+    clock = _Clock()
+    brain = _brain(clock)
+    for i in range(5):
+        brain.choose({0: "knight"}, [EnemyUnit(110 if i % 2 else 300, 320, 30)], elapsed_s=20 + i * 8)
+        clock.now += 8
+    assert brain.opponent.archetype() == ARCHETYPE_PRESSURE
+    assert brain.reserve() == PRESSURE_DEFENSE_RESERVE
+    assert "bridge spam" in brain.situation

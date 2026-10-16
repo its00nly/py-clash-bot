@@ -205,6 +205,14 @@ def elixir_at_least(iar, elixir_count: int) -> bool:
     return bool(pixel_is_equal(iar[y, x], ELIXIR_COLOR, tol=65))
 
 
+def read_elixir(iar) -> int:
+    """Current whole elixir (0-10) from a battle frame."""
+    for amount in range(len(ELIXIR_COORDS), 0, -1):
+        if elixir_at_least(iar, amount):
+            return amount
+    return 0
+
+
 def check_pixels_for_win_in_battle_log(emulator) -> bool:
     """Method to check pixels that appear in the battle
     log to determine if the previous game was a win

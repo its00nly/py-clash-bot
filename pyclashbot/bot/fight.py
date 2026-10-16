@@ -25,7 +25,7 @@ from pyclashbot.bot.coords import (
     QUICKMATCH_POPUP_BUTTON_COORD,
     START_FIGHT_BUTTON_COORD,
 )
-from pyclashbot.bot.find import find_enemy_units, read_tower_health
+from pyclashbot.bot.find import find_enemy_units, find_friendly_units, read_tower_health
 from pyclashbot.bot.nav import (
     check_for_in_battle_with_delay,
     get_to_activity_log,
@@ -48,11 +48,13 @@ from pyclashbot.bot.state_detect import (
     check_if_on_clash_main_menu,
     check_pixels_for_win_in_battle_log,
     count_elixir,
-    elixir_at_least,
+    read_elixir,
 )
 from pyclashbot.utils.logger import Logger
 from pyclashbot.utils.versioning import __version__
 
+# Smart battles wait only for the cheapest useful card; the brain decides the rest.
+SMART_MIN_ELIXIR = 2
 ELIXIR_WAIT_TIMEOUT = 40  # too high but someone got errors with that so idk
 ABILITY_TRIGGER_DELAY_S = 3
 
@@ -254,7 +256,8 @@ def wait_for_elixir(
 
         card_indices = check_which_cards_are_available(emulator)
         if brain is not None and card_indices:
-            threat = brain.should_defend_now(find_enemy_units(card_detection.battle_iar))
+            iar = card_detection.battle_iar
+            threat = brain.should_defend_now(find_enemy_units(iar), find_friendly_units(iar))
             if threat is not None:
                 logger.change_status(f"Enemy push in the {threat.lane} lane — defending now")
                 return True
@@ -487,8 +490,11 @@ def play_a_card(emulator, logger, recording_flag: bool, battle_strategy: "Battle
 
 def play_smart_card(
     emulator, logger, recording_flag: bool, battle_strategy: "BattleStrategy", brain: BattleBrain
-) -> bool:
-    """Read the hand and the board, then let the battle brain pick the card and spot."""
+) -> bool | Literal["hold"]:
+    """Read the hand and the board, then let the battle brain pick the card and spot.
+
+    Returns "hold" when the brain chose to wait (saving elixir) rather than failing to play.
+    """
     card_indices = check_which_cards_are_available(emulator, check_side=True)
     if not card_indices:
         logger.change_status("No cards ready yet...")
@@ -497,15 +503,18 @@ def play_smart_card(
     iar = card_detection.battle_iar
     hand = {index: identify_hand_cards(emulator, index) for index in card_indices}
     threats = find_enemy_units(iar)
+    friends = find_friendly_units(iar)
     brain.observe_towers(read_tower_health(iar))
     elapsed = battle_strategy.get_elapsed_time()
-    play = brain.choose(hand, threats, elapsed, elixir_full=iar is not None and elixir_at_least(iar, 10))
+    elixir = read_elixir(iar) if iar is not None else None
+    play = brain.choose(hand, threats, elapsed, elixir=elixir, friends=friends)
     if play is None:
-        logger.change_status("Holding cards for the next enemy push")
+        logger.change_status(f"Holding — {brain.situation}")
         time.sleep(0.5)
-        return False
+        return "hold"
 
     logger.change_status(f"Playing {play.card_id} — {play.reason}")
+    logger.log(f"Board: {brain.situation}")
     emulator.click(*HAND_CARDS_COORDS[play.index])
     emulator.click(*play.coord)
     if recording_flag:
@@ -631,7 +640,8 @@ def _fight_loop(
         # debug screenshot saving removed from production
 
         # Get elixir amount and thresholds based on current battle phase
-        elixir_amount = battle_strategy.select_elixir_amount()
+        # The smart brain reads elixir itself and decides when to hold, so it only waits for a cheap card.
+        elixir_amount = SMART_MIN_ELIXIR if brain is not None else battle_strategy.select_elixir_amount()
         wait_threshold, play_threshold = battle_strategy.get_thresholds()
 
         wait_output = wait_for_elixir(
@@ -665,6 +675,8 @@ def _fight_loop(
             played = play_smart_card(emulator, logger, recording_flag, battle_strategy, brain)
         else:
             played = play_a_card(emulator, logger, recording_flag, battle_strategy)
+        if played == "hold":
+            continue
         if played is False:
             logger.change_status("Failed to play a card, retrying...")
         else:

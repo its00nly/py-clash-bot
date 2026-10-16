@@ -14,6 +14,7 @@ import numpy as np
 from pyclashbot.bot.coords import (
     ENEMY_TOWER_HP_BARS,
     ENEMY_UNIT_SCAN_REGION_LTRB,
+    FRIENDLY_UNIT_SCAN_REGION_LTRB,
     LANE_SPLIT_X,
     OWN_TOWER_HP_BARS,
     UPGRADE_POINTS,
@@ -204,3 +205,41 @@ def read_tower_health(iar: np.ndarray | None) -> TowerHealth | None:
         enemy={lane: _bar_fraction(iar, bar, _ENEMY_TOWER_FILL_BGR) for lane, bar in ENEMY_TOWER_HP_BARS.items()},
         own={lane: _bar_fraction(iar, bar, _OWN_TOWER_FILL_BGR) for lane, bar in OWN_TOWER_HP_BARS.items()},
     )
+
+
+# Our troops' level badge + HP bar are light blue (BGR). Only the wide bar shape counts:
+# tower decorations share the color but are small squares. A bar shows once a troop is
+# fighting, which is exactly what "already being handled" needs.
+_FRIENDLY_BAR_BGR = (np.array([215, 170, 74]), np.array([255, 250, 154]))
+_FRIENDLY_BAR_MIN_W = 14
+_FRIENDLY_BAR_MAX_H = 10
+_TOWER_BAR_MARGIN = 6
+
+
+def _on_own_tower_bar(x: int, y: int) -> bool:
+    return any(
+        x_left - _TOWER_BAR_MARGIN <= x <= x_right + _TOWER_BAR_MARGIN and abs(y - bar_y) <= _TOWER_BAR_MARGIN
+        for x_left, x_right, bar_y in OWN_TOWER_HP_BARS.values()
+    )
+
+
+def find_friendly_units(iar: np.ndarray | None) -> list[EnemyUnit]:
+    """Locate our own troops that are in a fight (their HP bar is showing)."""
+    if iar is None:
+        return []
+    left, top, right, bottom = FRIENDLY_UNIT_SCAN_REGION_LTRB
+    crop = iar[top:bottom, left:right]
+    if crop.size == 0:
+        return []
+    mask = cv2.dilate(cv2.inRange(crop, *_FRIENDLY_BAR_BGR), np.ones((3, 3), np.uint8))
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    units = []
+    for i in range(1, count):
+        width, height = stats[i][cv2.CC_STAT_WIDTH], stats[i][cv2.CC_STAT_HEIGHT]
+        if width < _FRIENDLY_BAR_MIN_W or height > _FRIENDLY_BAR_MAX_H:
+            continue
+        x, y = int(centroids[i][0]) + left, int(centroids[i][1]) + top
+        if _on_own_tower_bar(x, y):
+            continue
+        units.append(EnemyUnit(x=x, y=y + _BADGE_TO_BODY_DY, size=int(stats[i][cv2.CC_STAT_AREA])))
+    return units
