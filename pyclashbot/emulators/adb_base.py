@@ -281,3 +281,41 @@ class AdbBasedController(BaseEmulatorController, ABC):
         if result.returncode != 0:
             raise EmulatorNotReadyError(f"Failed to launch {package_name}: monkey returned rc={result.returncode}")
         return True
+
+    def wait_for_boot(self, timeout: float = 120, poll_interval: float = 2) -> None:
+        """Block until Android reports ``sys.boot_completed=1``.
+
+        adbd accepts connections (and ``pm list packages`` answers) well before
+        Android finishes booting; launching an app in that window fails with
+        "No activities found" and the connection can drop mid-boot (issue #741).
+
+        Raises:
+            EmulatorNotReadyError: If boot does not complete within ``timeout``.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                result = self.adb("shell getprop sys.boot_completed")
+            except EmulatorNotReadyError:
+                result = None
+            if result is not None and result.returncode == 0 and (result.stdout or "").strip() == "1":
+                return
+            time.sleep(poll_interval)
+        raise EmulatorNotReadyError(f"Android did not finish booting within {timeout:.0f}s")
+
+    def start_app_when_ready(self, package_name: str, attempts: int = 5, retry_delay: float = 3) -> bool:
+        """Launch an app, retrying while the emulator is still settling after boot.
+
+        A missing app is reported immediately; only launch failures are retried.
+        """
+        if not self._check_app_installed(package_name):
+            raise EmulatorNotReadyError(f"{package_name} is not installed on the emulator")
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.start_app(package_name)
+            except EmulatorNotReadyError:
+                if attempt == attempts:
+                    raise
+                logger.info("Launch attempt %d/%d for %s failed, retrying", attempt, attempts, package_name)
+                time.sleep(retry_delay)
+        return False

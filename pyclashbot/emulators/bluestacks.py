@@ -646,10 +646,14 @@ class BlueStacksEmulatorController(AdbBasedController):
                 raise EmulatorNotReadyError("BlueStacks 5 restart() could not connect ADB to the instance")
             time.sleep(1)
 
-        # Launch Clash Royale (start_app raises EmulatorNotReadyError if it isn't installed)
+        # adbd answers before Android has finished booting; launching then fails (#741)
+        self.logger.change_status("Waiting for Android to finish booting...")
+        self.wait_for_boot(timeout=120)
+
+        # Launch Clash Royale (raises EmulatorNotReadyError if it isn't installed)
         clash_pkg = CLASH_ROYALE_PACKAGE
         self.logger.change_status("Launching Clash Royale...")
-        self.start_app(clash_pkg)
+        self.start_app_when_ready(clash_pkg)
 
         time.sleep(5)
 
