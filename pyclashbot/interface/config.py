@@ -151,7 +151,7 @@ JOBS = [
     ),
     JobConfig(
         UIField.WAR_USER_TOGGLE,
-        "🛡️ Clan war",
+        "🛡 Clan war",
         default=False,
         tooltip="Play clan war battles from the war page.",
     ),

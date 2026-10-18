@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.filedialog
+import tkinter.font as tkfont
 import webbrowser
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import messagebox
 from typing import TYPE_CHECKING
 
 import ttkbootstrap as ttk
-from ttkbootstrap.constants import LEFT, READONLY, YES, X
+from ttkbootstrap.constants import LEFT, READONLY, X
 from ttkbootstrap.style import Colors
 from ttkbootstrap.widgets import ToolTip
 
@@ -30,6 +34,13 @@ from pyclashbot.interface.config import (
     JobConfig,
     deck_hero_card_options,
 )
+from pyclashbot.interface.debug_window import (
+    LAST_BATTLE_LABELS,
+    DebugPanel,
+    default_decisions_dir,
+    format_last_battle,
+    read_last_battle,
+)
 from pyclashbot.interface.enums import (
     BATTLE_STAT_FIELDS,
     BATTLE_STAT_LABELS,
@@ -45,7 +56,7 @@ from pyclashbot.interface.enums import (
     UIField,
     has_start_ready_job,
 )
-from pyclashbot.interface.widgets import DualRingGauge
+from pyclashbot.interface.widgets import DualRingGauge, NavButton, ResponsiveGrid, ScrollablePage
 from pyclashbot.utils.platform import (
     LOW_DISK_SPACE_BYTES,
     clear_recordings,
@@ -55,56 +66,69 @@ from pyclashbot.utils.platform import (
     recordings_total_bytes_all_locations,
     validate_recordings_path,
 )
+from pyclashbot.utils.versioning import __version__
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# Jobs tab layout (display only — JOBS in config.py keeps bot state-machine order).
-# Two columns of section groups to fit the Jobs tab at default height.
-_JOB_TAB_COLUMNS: tuple[tuple[tuple[str, tuple[UIField, ...]], ...], ...] = (
+# Jobs page layout (display only — JOBS in config.py keeps bot state-machine order).
+# Cards flow into a responsive grid in this order (two columns when wide enough).
+_JOB_SECTIONS: tuple[tuple[str, tuple[UIField, ...]], ...] = (
     (
+        "Battles",
         (
-            "Battles",
-            (
-                UIField.CLASSIC_1V1_USER_TOGGLE,
-                UIField.CLASSIC_2V2_USER_TOGGLE,
-                UIField.TROPHY_ROAD_USER_TOGGLE,
-                UIField.WAR_USER_TOGGLE,
-            ),
+            UIField.CLASSIC_1V1_USER_TOGGLE,
+            UIField.CLASSIC_2V2_USER_TOGGLE,
+            UIField.TROPHY_ROAD_USER_TOGGLE,
+            UIField.WAR_USER_TOGGLE,
         ),
-        (
-            "Collection",
-            (
-                UIField.CARD_UPGRADE_USER_TOGGLE,
-                UIField.UPGRADE_PRINCESS_USER_TOGGLE,
-                UIField.CARD_MASTERY_USER_TOGGLE,
-                UIField.SHOP_DAILY_OFFER_USER_TOGGLE,
-            ),
-        ),
-        ("Account", (UIField.SWITCH_ACCOUNTS_USER_TOGGLE,)),
     ),
     (
+        "Clan chat",
         (
-            "Clan chat",
-            (
-                UIField.CLAN_DONATE_USER_TOGGLE,
-                UIField.CLAN_REQUEST_CARDS_USER_TOGGLE,
-                UIField.CLAN_CLAIM_GIFTS_USER_TOGGLE,
-            ),
+            UIField.CLAN_DONATE_USER_TOGGLE,
+            UIField.CLAN_REQUEST_CARDS_USER_TOGGLE,
+            UIField.CLAN_CLAIM_GIFTS_USER_TOGGLE,
         ),
-        (
-            "Decks",
-            (
-                UIField.RANDOM_DECKS_USER_TOGGLE,
-                UIField.CYCLE_DECKS_USER_TOGGLE,
-                UIField.SMART_BATTLE_USER_TOGGLE,
-                UIField.DEBUG_VIEW_USER_TOGGLE,
-                UIField.RANDOM_PLAYS_USER_TOGGLE,
-            ),
-        ),
-        ("Options", (UIField.DISABLE_WIN_TRACK_TOGGLE,)),
     ),
+    (
+        "Collection",
+        (
+            UIField.CARD_UPGRADE_USER_TOGGLE,
+            UIField.UPGRADE_PRINCESS_USER_TOGGLE,
+            UIField.CARD_MASTERY_USER_TOGGLE,
+            UIField.SHOP_DAILY_OFFER_USER_TOGGLE,
+        ),
+    ),
+    ("Decks", (UIField.RANDOM_DECKS_USER_TOGGLE, UIField.CYCLE_DECKS_USER_TOGGLE)),
+    ("Account", (UIField.SWITCH_ACCOUNTS_USER_TOGGLE,)),
+    ("Options", (UIField.DISABLE_WIN_TRACK_TOGGLE,)),
 )
+# Fight-behaviour toggles live on the Battle AI page (same JOBS entries, same keys).
+_BATTLE_AI_FIELDS: tuple[UIField, ...] = (
+    UIField.SMART_BATTLE_USER_TOGGLE,
+    UIField.DEBUG_VIEW_USER_TOGGLE,
+    UIField.RANDOM_PLAYS_USER_TOGGLE,
+)
+
+# Sidebar pages: (key, label, glyph). PYCLASHBOT_UI_START_PAGE=<key> opens on that page.
+PAGE_DASHBOARD = "dashboard"
+PAGE_BATTLE_AI = "battle_ai"
+PAGE_JOBS = "jobs"
+PAGE_EMULATOR = "emulator"
+PAGE_SESSION = "session"
+PAGE_STATS = "stats"
+PAGE_SETTINGS = "settings"
+PAGES: tuple[tuple[str, str, str], ...] = (
+    (PAGE_DASHBOARD, "Dashboard", "▦"),
+    (PAGE_BATTLE_AI, "Battle AI", "⚔"),
+    (PAGE_JOBS, "Jobs", "☰"),
+    (PAGE_EMULATOR, "Emulator", "▣"),
+    (PAGE_SESSION, "Session", "⏱"),
+    (PAGE_STATS, "Stats", "≡"),
+    (PAGE_SETTINGS, "Settings", "⚙"),
+)
+_START_PAGE_ENV = "PYCLASHBOT_UI_START_PAGE"
 
 # Stored disable_win_track_toggle is inverted in the UI — see _job_toggle_default().
 _WIN_TRACK_UI_FIELD = UIField.DISABLE_WIN_TRACK_TOGGLE
@@ -116,31 +140,84 @@ _JOB_SPINBOX_LABELS: dict[UIField, str] = {
 }
 _JOB_TOGGLE_ON_STYLE = "round-toggle"
 _JOB_TOGGLE_OFF_STYLE = "secondary-round-toggle"
-_TAB_SECTION_STYLE = "TabSection.TLabelframe"
-_TAB_SECTION_PADDING = (8, 6)
-_TAB_CONTAINER_PADDING = (10, 8)
-_NOTEBOOK_STYLE = "App.TNotebook"
-_NOTEBOOK_TAB_STYLE = "App.TNotebook.Tab"
-_NOTEBOOK_TAB_COUNT = 5
-_NOTEBOOK_TAB_WIDTH_DIVISOR = 6  # Tcl tab width units vs notebook pixels (approx.)
+
+# Spacing scale (px): 8 inside rows, 16 between cards / page padding.
+_GAP = 16
+_GAP_SMALL = 8
+_PAGE_PADDING = (24, 20, 24, 24)
+_CARD_PADDING = (14, 10, 14, 12)
+_CARD_STYLE = "Card.TLabelframe"
+_CHROME_FRAME_STYLE = "Chrome.TFrame"
+_CHROME_LABEL_STYLE = "Chrome.TLabel"
+_CHROME_TITLE_STYLE = "ChromeTitle.TLabel"
+_CHROME_MUTED_STYLE = "ChromeMuted.TLabel"
+_TILE_FRAME_STYLE = "Tile.TFrame"
+_TILE_CAPTION_STYLE = "TileCaption.TLabel"
+_TILE_VALUE_STYLE = "TileValue.TLabel"
+_PAGE_TITLE_STYLE = "PageTitle.TLabel"
+_MUTED_LABEL_STYLE = "Muted.TLabel"
+_VALUE_LABEL_STYLE = "Value.TLabel"
+# How strongly the theme foreground is blended into the background for chrome / tiles / borders.
+_CHROME_TINT = 0.05
+_TILE_TINT = 0.08
+_NAV_HOVER_TINT = 0.12
+_CARD_BORDER_TINT = 0.16
+
 _IDLE_STATUS = "Idle"
 _START_BLOCKED_MESSAGE = "Enable at least one Battles, Clan chat, or Collection job to start."
-_ACTION_BUTTON_IPAD = (18, 2)
+_HEADER_BUTTON_WIDTH = 9
+# Header status pill: state -> (text, theme colour name).
+_PILL_IDLE = "Idle"
+_PILL_RUNNING = "Running"
+_PILL_PAUSED = "Paused"
+_PILL_STOPPING = "Stopping"
+_PILL_COLOURS = {
+    _PILL_IDLE: "secondary",
+    _PILL_RUNNING: "success",
+    _PILL_PAUSED: "warning",
+    _PILL_STOPPING: "danger",
+}
+_ACTIVITY_SIZE = 8
+# Dashboard stat tiles: (key, caption, initial value); update_stats() fills them.
+_DASHBOARD_TILES: tuple[tuple[str, str, str], ...] = (
+    ("wins", "Wins", "0"),
+    ("losses", "Losses", "0"),
+    ("winrate", "Win rate", "0%"),
+    ("battles", "Battles", "0"),
+    ("cards", "Cards played", "0"),
+    ("runtime", "Runtime", "00:00:00"),
+    ("streak", "Win streak (now / best)", "0 / 0"),
+    ("restarts", "Recovery restarts", "0"),
+)
+_LAST_BATTLE_REFRESH_MS = 4000
+_EMBEDDED_DEBUG_MAX_H = 380
 _WIN_GAUGE_DIAMETER = 58
 _WIN_GAUGE_THICKNESS = 8
 _APP_ICON_NAME = "pixel-pycb.ico"
 _DISCORD_INVITE_URL = "https://pyclashbot.app/discord/invite"
 _GITHUB_PROJECT_URL = "https://github.com/pyclashbot/py-clash-bot"
 _UPLOAD_RECORDINGS_URL = "https://www.royaletrainer.com/upload"
-# How often the "recordings using N GB" note recomputes folder size (ms).
 # Session-tab fields that are on/off toggles or free text; the rest are numeric spinboxes.
 _SESSION_BOOL_FIELDS = (UIField.SCHEDULE_TOGGLE, UIField.DISCORD_WEBHOOK_TOGGLE)
 _SESSION_TEXT_FIELDS = (UIField.DISCORD_WEBHOOK_URL,)
+# How often the "recordings using N GB" note recomputes folder size (ms).
 _RECORDINGS_SIZE_REFRESH_MS = 3 * 60 * 1000  # 3 minutes
 _DISCORD_BRAND = "#5865F2"
 _GITHUB_BRAND = "#238636"
 _DISCORD_BUTTON_STYLE = "App.Discord.TButton"
 _GITHUB_BUTTON_STYLE = "App.GitHub.TButton"
+# Battle counters summed for the Dashboard "Battles" tile.
+_BATTLE_COUNT_FIELDS = (
+    StatField.CLASSIC_1V1_FIGHTS,
+    StatField.CLASSIC_2V2_FIGHTS,
+    StatField.TROPHY_ROAD_1V1_FIGHTS,
+    StatField.WAR_FIGHTS,
+)
+
+
+def _version_text() -> str:
+    version = str(__version__ or "dev")
+    return version if version.startswith("v") or not version[:1].isdigit() else f"v{version}"
 
 
 def no_jobs_popup() -> None:
@@ -149,10 +226,10 @@ def no_jobs_popup() -> None:
 
 class PyClashBotUI(ttk.Window):
     DEFAULT_THEME = "darkly"
-    DEFAULT_WIDTH = 520
-    DEFAULT_HEIGHT = 540
-    MIN_WIDTH = 520
-    MIN_HEIGHT = 540
+    DEFAULT_WIDTH = 1100
+    DEFAULT_HEIGHT = 720
+    MIN_WIDTH = 900
+    MIN_HEIGHT = 600
 
     def __init__(self) -> None:
         super().__init__(themename=self.DEFAULT_THEME)
@@ -194,15 +271,37 @@ class PyClashBotUI(ttk.Window):
         # "Open debug view" button (shown while the Debug view toggle is on) and its window.
         self._debug_view_button: ttk.Button | None = None
         self._debug_window = None
+        self.debug_panel: DebugPanel | None = None
+        # Header state: Pause pressed / Stop in progress (drive the status pill only).
+        self._paused = False
+        self._stopping = False
+        self._status_text = _IDLE_STATUS
+        self._activity: deque[tuple[str, str]] = deque(maxlen=_ACTIVITY_SIZE)
+        self.decisions_dir = default_decisions_dir()
+        self.jobs_vars: dict[UIField, ttk.BooleanVar] = {}
+        self._job_defaults = {job.key: job.default for job in JOBS}
+        self._jobs_by_key = {job.key: job for job in JOBS}
+        self._pages: dict[str, ScrollablePage] = {}
+        self._nav_buttons: dict[str, NavButton] = {}
+        self._current_page = ""
 
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)  # Tab area absorbs extra height
-        self.rowconfigure(1, weight=0)  # Status log + Start stay compact
+        self._init_fonts()
+        self._init_custom_styles()
 
-        self._build_tabs()
-        self._build_bottom_row()
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1)  # Page area absorbs extra height
+
+        self.dashboard_status_var = ttk.StringVar(value=_IDLE_STATUS)
+        self._build_header()
+        self._build_footer()
+        self._build_body()
         self._sync_brand_button_styles()
         self._refresh_theme_colours()
+        self._bind_mousewheel()
+        self._refresh_last_battle(force=True)
+        self.after(_LAST_BATTLE_REFRESH_MS, self._schedule_last_battle_refresh)
+        start_page = os.environ.get(_START_PAGE_ENV, "").strip().lower()
+        self.show_page(start_page if start_page in self._pages else PAGE_DASHBOARD)
 
     def register_config_callback(self, callback: Callable[[dict[str, object]], None]) -> None:
         self._config_callback = callback
@@ -397,12 +496,18 @@ class PyClashBotUI(ttk.Window):
         """Set the main button state: 'idle' or 'running'."""
         self._button_state = state
         if state == "idle":
+            self._stopping = False
             self._sync_start_button_readiness()
-            self.pause_btn.grid_remove()
+            self.pause_btn.configure(state=tk.DISABLED)
+            self.stop_btn.configure(state=tk.DISABLED)
             self.set_paused(False)
         elif state == "running":
-            self.main_btn.configure(text="Stop", bootstyle="danger", state=tk.NORMAL)
-            self.pause_btn.grid()
+            self._stopping = False
+            # Start is replaced by Stop/Pause while running; main_btn keeps its __main__ command.
+            self.main_btn.configure(text="Start", bootstyle="success", state=tk.DISABLED)
+            self.pause_btn.configure(state=tk.NORMAL)
+            self.stop_btn.configure(state=tk.NORMAL)
+        self._sync_status_pill()
 
         # Disable/enable config widgets based on running state
         running = state == "running"
@@ -457,11 +562,23 @@ class PyClashBotUI(ttk.Window):
         return self._button_state
 
     def append_log(self, message: str) -> None:
-        self.event_log.configure(state="normal")
-        self.event_log.delete("1.0", "end")
-        self.event_log.insert("end", message)
-        self.event_log.configure(state="disabled")
-        self.event_log.see("end")
+        """Show the current status line (footer + Dashboard) and record it in Recent activity."""
+        current = self.event_log.get("1.0", "end-1c")
+        if message != current:
+            self.event_log.configure(state="normal")
+            self.event_log.delete("1.0", "end")
+            self.event_log.insert("end", message)
+            self.event_log.configure(state="disabled")
+            self.event_log.see("end")
+        self.dashboard_status_var.set(message)
+        # The poll loop re-sends the same line ~10x/s; only changes become activity rows.
+        if message and (not self._activity or self._activity[-1][1] != message):
+            self._activity.append((time.strftime("%H:%M:%S"), message))
+            self._refresh_activity()
+
+    def recent_activity(self) -> list[str]:
+        """Recent status messages, newest first."""
+        return [message for _stamp, message in reversed(self._activity)]
 
     def set_status(self, text: str) -> None:
         self._status_text = text
@@ -507,67 +624,222 @@ class PyClashBotUI(ttk.Window):
         if hasattr(self, "best_streak_var"):
             self.best_streak_var.set(str(best_streak))
 
-    def _build_tabs(self) -> None:
-        self._style.configure(f"{_TAB_SECTION_STYLE}.Label", anchor="center")
-        self._init_notebook_style()
+        tiles = self.dashboard_vars
+        tiles["wins"].set(str(wins))
+        tiles["losses"].set(str(losses))
+        tiles["winrate"].set(f"{winrate:.0f}%")
+        tiles["battles"].set(str(sum(as_int(field) for field in _BATTLE_COUNT_FIELDS)))
+        tiles["cards"].set(str(as_int(StatField.CARDS_PLAYED)))
+        if runtime is not None:
+            tiles["runtime"].set(str(runtime))
+        tiles["streak"].set(f"{current_streak} / {best_streak}")
+        if failures is not None:
+            tiles["restarts"].set(str(failures))
 
-        self.notebook = ttk.Notebook(self, style=_NOTEBOOK_STYLE)
-        self.notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
-        self.notebook.bind("<Configure>", self._sync_notebook_tab_widths, add="+")
+    # ---- layout: header / sidebar / pages / footer ------------------------------------
 
-        self.jobs_tab = ttk.Frame(self.notebook)
-        self.emulator_tab = ttk.Frame(self.notebook)
-        self.stats_tab = ttk.Frame(self.notebook)
-        self.session_tab = ttk.Frame(self.notebook)
-        self.misc_tab = ttk.Frame(self.notebook)
+    def _init_fonts(self) -> None:
+        """Slightly larger base font plus a few named fonts for titles and stat tiles."""
+        default_font = tkfont.nametofont("TkDefaultFont")
+        default_font.configure(size=10)
+        with contextlib.suppress(tk.TclError):
+            tkfont.nametofont("TkTextFont").configure(size=10)
+        family = str(default_font.actual("family"))
+        self._fonts = {
+            "app_title": tkfont.Font(self, family=family, size=15, weight="bold"),
+            "page_title": tkfont.Font(self, family=family, size=17, weight="bold"),
+            "card_title": tkfont.Font(self, family=family, size=10, weight="bold"),
+            "tile_value": tkfont.Font(self, family=family, size=20, weight="bold"),
+            "tile_caption": tkfont.Font(self, family=family, size=8, weight="bold"),
+            "status": tkfont.Font(self, family=family, size=12),
+            "pill": tkfont.Font(self, family=family, size=9, weight="bold"),
+            "nav": tkfont.Font(self, family=family, size=10),
+            "small": tkfont.Font(self, family=family, size=9),
+        }
 
-        self.notebook.add(self.jobs_tab, text="Jobs")
-        self.notebook.add(self.emulator_tab, text="Emulator")
-        self.notebook.add(self.stats_tab, text="Stats")
-        self.notebook.add(self.session_tab, text="Session")
-        self.notebook.add(self.misc_tab, text="Misc")
+    def _theme_colours(self) -> dict[str, str]:
+        """Chrome / tile / border colours derived from the active theme (works for light themes too)."""
+        colors = self._style.colors
+        return {
+            "bg": colors.bg,
+            "fg": colors.fg,
+            "chrome": Colors.make_transparent(_CHROME_TINT, colors.fg, colors.bg),
+            "tile": Colors.make_transparent(_TILE_TINT, colors.fg, colors.bg),
+            "hover": Colors.make_transparent(_NAV_HOVER_TINT, colors.fg, colors.bg),
+            "border": Colors.make_transparent(_CARD_BORDER_TINT, colors.fg, colors.bg),
+            "muted": self._muted_foreground(),
+            "accent": self._stat_accent_foreground(),
+            "primary": colors.primary,
+        }
 
-        self._create_jobs_tab()
-        self._create_emulator_tab()
-        self._create_stats_tab()
-        self._create_session_tab()
-        self._create_misc_tab()
-        self.after_idle(self._sync_notebook_tab_widths)
-
-    def _init_notebook_style(self) -> None:
-        """Equal-width, centered top tabs shared across the app."""
-        self._style.layout(_NOTEBOOK_STYLE, self._style.layout("TNotebook"))
-        self._style.configure(_NOTEBOOK_STYLE, tabmargins=(2, 4, 2, 0))
-        self._style.configure(
-            _NOTEBOOK_TAB_STYLE,
-            padding=(10, 6),
-            anchor="center",
+    def _init_custom_styles(self) -> None:
+        """(Re)register the app's ttk styles; theme_use() resets them, so this runs after every theme change."""
+        c = self._theme_colours()
+        style = self._style
+        style.configure(_CARD_STYLE, padding=_CARD_PADDING, bordercolor=c["border"])
+        style.configure(f"{_CARD_STYLE}.Label", font=self._fonts["card_title"], foreground=c["fg"])
+        style.configure(_CHROME_FRAME_STYLE, background=c["chrome"])
+        style.configure(_CHROME_LABEL_STYLE, background=c["chrome"], foreground=c["fg"])
+        style.configure(_CHROME_TITLE_STYLE, background=c["chrome"], foreground=c["fg"], font=self._fonts["app_title"])
+        style.configure(_CHROME_MUTED_STYLE, background=c["chrome"], foreground=c["muted"], font=self._fonts["small"])
+        style.configure(_TILE_FRAME_STYLE, background=c["tile"])
+        style.configure(
+            _TILE_CAPTION_STYLE, background=c["tile"], foreground=c["muted"], font=self._fonts["tile_caption"]
         )
+        style.configure(_TILE_VALUE_STYLE, background=c["tile"], foreground=c["accent"], font=self._fonts["tile_value"])
+        style.configure(_PAGE_TITLE_STYLE, font=self._fonts["page_title"], foreground=c["fg"])
+        style.configure(_MUTED_LABEL_STYLE, foreground=c["muted"])
+        style.configure(_VALUE_LABEL_STYLE, foreground=c["accent"], font=self._fonts["card_title"])
+        for page in self._pages.values():
+            page.set_background(c["bg"])
+        self._sync_nav_colours()
 
-    def _sync_notebook_tab_widths(self, event: tk.Event | None = None) -> None:
-        if event is not None and event.widget is not self.notebook:
+    def _sync_nav_colours(self) -> None:
+        c = self._theme_colours()
+        colors = self._style.colors
+        for button in self._nav_buttons.values():
+            button.set_colours(
+                bg=c["chrome"], hover=c["hover"], active=colors.primary, fg=c["fg"], active_fg=colors.selectfg
+            )
+
+    def _build_header(self) -> None:
+        """Title + version, the status pill, and Start / Pause / Stop — always visible."""
+        header = ttk.Frame(self, style=_CHROME_FRAME_STYLE, padding=(20, 12))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew")
+        header.columnconfigure(2, weight=1)
+
+        ttk.Label(header, text="py-clash-bot", style=_CHROME_TITLE_STYLE).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text=_version_text(), style=_CHROME_MUTED_STYLE).grid(
+            row=0, column=1, sticky="s", padx=(_GAP_SMALL, 0), pady=(0, 3)
+        )
+        self.status_pill = tk.Label(
+            header, text=_PILL_IDLE, font=self._fonts["pill"], padx=12, pady=3, borderwidth=0, fg="#ffffff"
+        )
+        self.status_pill.grid(row=0, column=2, sticky="w", padx=(_GAP + 4, 0))
+
+        buttons = ttk.Frame(header, style=_CHROME_FRAME_STYLE)
+        buttons.grid(row=0, column=3, sticky="e")
+        self.main_btn = ttk.Button(buttons, text="Start", bootstyle="success", width=_HEADER_BUTTON_WIDTH)
+        self.main_btn.pack(side=LEFT, ipady=2)
+        self._register_config_widget("main_btn", self.main_btn)
+        # Pause/Resume and Stop are enabled only while the bot runs; __main__ wires pause_btn's command.
+        self.pause_btn = ttk.Button(
+            buttons, text="Pause", bootstyle="warning-outline", width=_HEADER_BUTTON_WIDTH, state=tk.DISABLED
+        )
+        self.pause_btn.pack(side=LEFT, padx=(_GAP_SMALL, 0), ipady=2)
+        self.stop_btn = ttk.Button(
+            buttons,
+            text="Stop",
+            bootstyle="danger-outline",
+            width=_HEADER_BUTTON_WIDTH,
+            state=tk.DISABLED,
+            command=self._on_stop_clicked,
+        )
+        self.stop_btn.pack(side=LEFT, padx=(_GAP_SMALL, 0), ipady=2)
+        ttk.Separator(self, orient="horizontal").grid(row=0, column=0, columnspan=2, sticky="sew")
+
+    def _build_body(self) -> None:
+        sidebar = ttk.Frame(self, style=_CHROME_FRAME_STYLE, padding=(10, _GAP, 10, _GAP))
+        sidebar.grid(row=1, column=0, sticky="ns")
+        for name, label, glyph in PAGES:
+            button = NavButton(
+                sidebar,
+                text=label,
+                glyph=glyph,
+                font=self._fonts["nav"],
+                command=lambda page=name: self.show_page(page),
+            )
+            button.pack(fill=X, pady=2)
+            self._nav_buttons[name] = button
+        self._sync_nav_colours()
+
+        page_area = ttk.Frame(self)
+        page_area.grid(row=1, column=1, sticky="nsew")
+        page_area.columnconfigure(0, weight=1)
+        page_area.rowconfigure(0, weight=1)
+        for name, _label, _glyph in PAGES:
+            page = ScrollablePage(page_area, padding=_PAGE_PADDING)
+            page.grid(row=0, column=0, sticky="nsew")
+            page.grid_remove()
+            page.set_background(self._style.colors.bg)
+            self._pages[name] = page
+
+        self.dashboard_tab = self._pages[PAGE_DASHBOARD].body
+        self.battle_ai_tab = self._pages[PAGE_BATTLE_AI].body
+        self.jobs_tab = self._pages[PAGE_JOBS].body
+        self.emulator_tab = self._pages[PAGE_EMULATOR].body
+        self.session_tab = self._pages[PAGE_SESSION].body
+        self.stats_tab = self._pages[PAGE_STATS].body
+        self.misc_tab = self._pages[PAGE_SETTINGS].body
+
+        self._create_dashboard_page()
+        self._create_jobs_tab()
+        self._create_battle_ai_page()
+        self._create_emulator_tab()
+        self._create_session_tab()
+        self._create_stats_tab()
+        self._create_misc_tab()
+
+    def _build_footer(self) -> None:
+        ttk.Separator(self, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="new")
+        footer = ttk.Frame(self, style=_CHROME_FRAME_STYLE, padding=(20, 7))
+        footer.grid(row=2, column=0, columnspan=2, sticky="ew")
+        footer.columnconfigure(1, weight=1)
+        ttk.Label(footer, text="Status", style=_CHROME_MUTED_STYLE).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.event_log = tk.Text(footer, height=1, wrap="none", font=self._fonts["small"])
+        self.event_log.grid(row=0, column=1, sticky="ew")
+        self.event_log.configure(state="disabled")
+        self._style_status_log()
+
+    def show_page(self, name: str) -> None:
+        """Switch the content area to a sidebar page (see PAGES); unknown names are ignored."""
+        page = self._pages.get(name)
+        if page is None:
             return
+        for other_name, other in self._pages.items():
+            if other_name != name:
+                other.grid_remove()
+        page.grid()
+        self._current_page = name
+        for button_name, button in self._nav_buttons.items():
+            button.set_active(button_name == name)
+        if name == PAGE_BATTLE_AI:
+            self.after_idle(lambda: self._refresh_last_battle(force=True))
+
+    @property
+    def current_page(self) -> str:
+        return self._current_page
+
+    def _bind_mousewheel(self) -> None:
+        """One global wheel binding that scrolls whichever page is under the pointer."""
+        self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self.bind_all("<Button-4>", lambda e: self._scroll_page_at(e, -1), add="+")
+        self.bind_all("<Button-5>", lambda e: self._scroll_page_at(e, 1), add="+")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        delta = int(getattr(event, "delta", 0) or 0)
+        if not delta:
+            return
+        # Windows reports multiples of 120 per notch; macOS reports small raw deltas.
+        units = -(delta // 120) if abs(delta) >= 120 else (-1 if delta > 0 else 1)
+        self._scroll_page_at(event, units)
+
+    def _scroll_page_at(self, event: tk.Event, units: int) -> None:
         try:
-            width = self.notebook.winfo_width()
-        except tk.TclError:
-            return
-        if width <= 1:
-            return
-        tab_width = max(10, width // (_NOTEBOOK_TAB_COUNT * _NOTEBOOK_TAB_WIDTH_DIVISOR))
-        try:
-            self._style.configure(_NOTEBOOK_TAB_STYLE, width=tab_width)
-        except tk.TclError:
-            return
+            widget = self.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):
+            return  # e.g. a combobox popdown, which tkinter has no wrapper for
+        while widget is not None:
+            if isinstance(widget, ScrollablePage):
+                widget.scroll_units(units)
+                return
+            widget = getattr(widget, "master", None)
 
     def _section_labelframe(self, parent: tk.Misc, title: str) -> ttk.Labelframe:
-        """Section box with a centered title — same look across tabs."""
-        return ttk.Labelframe(
-            parent,
-            text=title,
-            labelanchor="n",
-            style=_TAB_SECTION_STYLE,
-            padding=_TAB_SECTION_PADDING,
-        )
+        """Section card with a bold title — same look on every page."""
+        frame = ttk.Labelframe(parent, text=title, labelanchor="nw", style=_CARD_STYLE, padding=_CARD_PADDING)
+        frame.columnconfigure(0, weight=1)
+        return frame
 
     def _compact_action_button_row(
         self,
@@ -636,13 +908,17 @@ class PyClashBotUI(ttk.Window):
         except (ImportError, OSError, tk.TclError):
             return
 
-    def _prepare_tab_page(self, tab: ttk.Frame) -> ttk.Frame:
-        """Fill the tab page; extra height opens below the content, not under Start."""
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(0, weight=1)
-        page = ttk.Frame(tab, padding=_TAB_CONTAINER_PADDING)
-        page.pack(fill="both", expand=YES)
-        content = ttk.Frame(page)
+    def _prepare_tab_page(self, tab: ttk.Frame, title: str = "", subtitle: str = "") -> ttk.Frame:
+        """Page heading + a full-width content frame inside a scrollable page body."""
+        if title:
+            heading = ttk.Frame(tab)
+            heading.pack(fill=X, pady=(0, _GAP))
+            ttk.Label(heading, text=title, style=_PAGE_TITLE_STYLE).pack(anchor="w")
+            if subtitle:
+                ttk.Label(heading, text=subtitle, style=_MUTED_LABEL_STYLE, wraplength=760, justify=LEFT).pack(
+                    anchor="w", pady=(2, 0)
+                )
+        content = ttk.Frame(tab)
         content.pack(fill=X, anchor="n")
         content.columnconfigure(0, weight=1)
         return content
@@ -653,201 +929,322 @@ class PyClashBotUI(ttk.Window):
         kwargs.setdefault("style", "TCombobox")
         return ttk.Combobox(parent, **kwargs)
 
-    def _build_bottom_row(self) -> None:
-        bottom = ttk.Frame(self)
-        bottom.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
-        bottom.columnconfigure(0, weight=1)
-
-        status_frame = self._section_labelframe(bottom, "Status")
-        status_frame.grid(row=0, column=0, sticky="ew")
-        status_frame.columnconfigure(0, weight=1)
-
-        self.event_log = tk.Text(status_frame, height=1, wrap="word")
-        self.event_log.grid(row=0, column=0, sticky="ew")
-        self.event_log.configure(state="disabled")
-        self._status_text = "Idle"
-        self._style_status_log()
-
-        self._main_btn_row = ttk.Frame(bottom)
-        self._main_btn_row.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        self._main_btn_row.columnconfigure(0, weight=1)
-        self._main_btn_row.columnconfigure(1, weight=0)
-        self._main_btn_row.columnconfigure(2, weight=1)
-        ipadx, ipady = _ACTION_BUTTON_IPAD
-
-        self.main_btn = ttk.Button(self._main_btn_row, text="Start", bootstyle="success")
-        self.main_btn.grid(row=0, column=1, ipadx=ipadx, ipady=ipady)
-        self._register_config_widget("main_btn", self.main_btn)
-
-        # Pause/Resume is only visible while the bot runs; __main__ wires its command.
-        self.pause_btn = ttk.Button(self._main_btn_row, text="Pause", bootstyle="warning-outline")
-        self.pause_btn.grid(row=0, column=2, sticky="w", padx=(8, 0), ipady=ipady)
-        self.pause_btn.grid_remove()
+    # ---- header state -------------------------------------------------------------------
 
     def set_paused(self, paused: bool) -> None:
+        self._paused = paused
         self.pause_btn.configure(text="Resume" if paused else "Pause")
+        self._sync_status_pill()
+
+    def _on_stop_clicked(self) -> None:
+        """Header Stop: runs main_btn's command, which __main__ wires to its Start/Stop handler."""
+        if self._button_state != "running":
+            return
+        self._stopping = True
+        self._sync_status_pill()
+        self.update_idletasks()
+        command = str(self.main_btn.cget("command") or "")
+        if command:
+            self.tk.call(command)
+
+    @property
+    def status_state(self) -> str:
+        """Header pill state: Idle, Running, Paused or Stopping."""
+        if self._button_state == "running":
+            if self._stopping:
+                return _PILL_STOPPING
+            return _PILL_PAUSED if self._paused else _PILL_RUNNING
+        return _PILL_STOPPING if self._stopping else _PILL_IDLE
+
+    def _sync_status_pill(self) -> None:
+        pill = getattr(self, "status_pill", None)
+        if pill is None:
+            return
+        state = self.status_state
+        colour = getattr(self._style.colors, _PILL_COLOURS[state], "") or "#555555"
+        try:
+            pill.configure(text=f"●  {state}", bg=colour)
+        except tk.TclError:
+            return
+
+    # ---- Dashboard ------------------------------------------------------------------------
+
+    def _create_dashboard_page(self) -> None:
+        content = self._prepare_tab_page(self.dashboard_tab, "Dashboard", "Live overview of the current session.")
+
+        self.dashboard_vars: dict[str, ttk.StringVar] = {}
+        tiles = ResponsiveGrid(content, min_column_width=150, max_columns=4, gap=12)
+        tiles.pack(fill=X)
+        for key, caption, default in _DASHBOARD_TILES:
+            var = ttk.StringVar(value=default)
+            self.dashboard_vars[key] = var
+            tiles.add(self._stat_tile(tiles, caption, var))
+
+        cards = ResponsiveGrid(content, min_column_width=340, gap=_GAP)
+        cards.pack(fill=X, pady=(4, 0))
+
+        status_card = self._section_labelframe(cards, "Current status")
+        ttk.Label(
+            status_card,
+            textvariable=self.dashboard_status_var,
+            font=self._fonts["status"],
+            wraplength=380,
+            justify=LEFT,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            status_card,
+            text="Start, Pause and Stop live in the header. Pick jobs on the Jobs page and fight "
+            "behaviour on the Battle AI page.",
+            style=_MUTED_LABEL_STYLE,
+            wraplength=380,
+            justify=LEFT,
+        ).grid(row=1, column=0, sticky="w", pady=(_GAP_SMALL, 0))
+        cards.add(status_card)
+
+        activity_card = self._section_labelframe(cards, "Recent activity")
+        activity_card.columnconfigure(0, weight=0)
+        activity_card.columnconfigure(1, weight=1)
+        self._activity_rows: list[tuple[ttk.Label, ttk.Label]] = []
+        for index in range(_ACTIVITY_SIZE):
+            stamp = ttk.Label(activity_card, text="", style=_MUTED_LABEL_STYLE, font=self._fonts["small"])
+            stamp.grid(row=index, column=0, sticky="nw", padx=(0, 12), pady=1)
+            message = ttk.Label(activity_card, text="", wraplength=320, justify=LEFT)
+            message.grid(row=index, column=1, sticky="w", pady=1)
+            self._activity_rows.append((stamp, message))
+        cards.add(activity_card)
+        self._refresh_activity()
+
+    def _stat_tile(self, parent: tk.Misc, caption: str, var: tk.Variable) -> ttk.Frame:
+        tile = ttk.Frame(parent, style=_TILE_FRAME_STYLE, padding=(16, 12, 16, 14))
+        ttk.Label(tile, text=caption.upper(), style=_TILE_CAPTION_STYLE).pack(anchor="w")
+        ttk.Label(tile, textvariable=var, style=_TILE_VALUE_STYLE).pack(anchor="w", pady=(4, 0))
+        return tile
+
+    def _refresh_activity(self) -> None:
+        rows = getattr(self, "_activity_rows", None)
+        if not rows:
+            return
+        entries = list(reversed(self._activity))
+        for index, (stamp_label, message_label) in enumerate(rows):
+            if index < len(entries):
+                stamp, message = entries[index]
+            else:
+                stamp, message = "", ("No activity yet." if index == 0 else "")
+            stamp_label.configure(text=stamp)
+            message_label.configure(text=message)
+
+    # ---- Battle AI --------------------------------------------------------------------------
+
+    def _create_battle_ai_page(self) -> None:
+        content = self._prepare_tab_page(
+            self.battle_ai_tab,
+            "Battle AI",
+            "How the bot plays fights, what happened in the last one, and a live feed of its decisions.",
+        )
+        cards = ResponsiveGrid(content, min_column_width=340, gap=_GAP)
+        cards.pack(fill=X)
+
+        behaviour = self._section_labelframe(cards, "Fight behaviour")
+        row = 0
+        for field in _BATTLE_AI_FIELDS:
+            row = self._add_job_row(behaviour, self._jobs_by_key[field], row)
+            if field == UIField.DEBUG_VIEW_USER_TOGGLE:
+                row = self._add_debug_view_button(behaviour, row)
+        cards.add(behaviour)
+
+        self._last_battle_card = self._section_labelframe(cards, "Last battle")
+        self._build_last_battle_card(self._last_battle_card)
+        cards.add(self._last_battle_card)
+
+        feed = self._section_labelframe(content, "Live debug feed")
+        feed.pack(fill=X)
+        ttk.Label(
+            feed,
+            text="Turn on Debug view and start a smart battle to stream annotated frames here. "
+            "Open debug view pops out a larger copy.",
+            style=_MUTED_LABEL_STYLE,
+            wraplength=760,
+            justify=LEFT,
+        ).grid(row=0, column=0, sticky="w", pady=(0, _GAP_SMALL))
+        self.debug_panel = DebugPanel(feed, max_height=_EMBEDDED_DEBUG_MAX_H, text_width=52, show_footer=False)
+        self.debug_panel.grid(row=1, column=0, sticky="ew")
+        self._sync_all_job_toggle_appearances()
+
+    def _build_last_battle_card(self, card: ttk.Labelframe) -> None:
+        card.columnconfigure(0, weight=1)
+        card.columnconfigure(1, weight=0)
+        self._last_battle_vars: dict[str, ttk.StringVar] = {}
+        for index, label in enumerate(LAST_BATTLE_LABELS):
+            ttk.Label(card, text=label, style=_MUTED_LABEL_STYLE).grid(row=index, column=0, sticky="w", pady=1)
+            var = ttk.StringVar(value="-")
+            ttk.Label(card, textvariable=var, style=_VALUE_LABEL_STYLE).grid(row=index, column=1, sticky="e", pady=1)
+            self._last_battle_vars[label] = var
+        self.last_battle_note = ttk.Label(
+            card, text="", style=_MUTED_LABEL_STYLE, font=self._fonts["small"], wraplength=340, justify=LEFT
+        )
+        self.last_battle_note.grid(row=len(LAST_BATTLE_LABELS), column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.last_battle_summary: dict[str, object] | None = None
+
+    def _schedule_last_battle_refresh(self) -> None:
+        self._refresh_last_battle()
+        with contextlib.suppress(tk.TclError):
+            self.after(_LAST_BATTLE_REFRESH_MS, self._schedule_last_battle_refresh)
+
+    def _refresh_last_battle(self, force: bool = False) -> None:
+        """Re-read the newest decision log's end event; skipped while the Battle AI page is hidden."""
+        card = getattr(self, "_last_battle_card", None)
+        if card is None:
+            return
+        try:
+            if not force and not card.winfo_ismapped():
+                return
+        except tk.TclError:
+            return
+        summary = read_last_battle(self.decisions_dir)
+        self.last_battle_summary = summary
+        rows = dict(format_last_battle(summary))
+        for label, var in self._last_battle_vars.items():
+            var.set(rows.get(label, "-"))
+        if summary is None:
+            note = "No battles logged yet. Smart battles leave a summary here when they end."
+        elif summary.get("newer_unfinished"):
+            note = "A newer battle is running (or did not finish); showing the last finished one."
+        else:
+            note = f"From {summary.get('file')}"
+        with contextlib.suppress(tk.TclError):
+            self.last_battle_note.configure(text=note)
+
+    # ---- Jobs ---------------------------------------------------------------------------------
 
     def _create_jobs_tab(self) -> None:
-        content = self._prepare_tab_page(self.jobs_tab)
+        content = self._prepare_tab_page(
+            self.jobs_tab,
+            "Jobs",
+            "What the bot does each loop. Enable at least one Battles, Clan chat or Collection job to start.",
+        )
+        grid = ResponsiveGrid(content, min_column_width=320, gap=_GAP)
+        grid.pack(fill=X)
+        for section_title, job_keys in _JOB_SECTIONS:
+            section_frame = self._section_labelframe(grid, section_title)
+            grid_row = 0
+            for job_key in job_keys:
+                grid_row = self._add_job_row(section_frame, self._jobs_by_key[job_key], grid_row)
+            grid.add(section_frame)
+        self._sync_all_job_toggle_appearances()
 
-        columns_frame = ttk.Frame(content)
-        columns_frame.pack(fill=X)
-        columns_frame.columnconfigure(0, weight=1, uniform="jobs_cols")
-        columns_frame.columnconfigure(1, weight=1, uniform="jobs_cols")
+    def _place_extras_controls(
+        self, parent: tk.Misc, combo_config: ComboConfig, combo_field: UIField, job: JobConfig
+    ) -> None:
+        short_label = _JOB_SPINBOX_LABELS.get(combo_field, combo_config.label)
+        label = ttk.Label(parent, text=short_label)
+        label.pack(side=LEFT, padx=(0, 6))
+        self._job_row_extras.setdefault(job.key, []).append(label)
 
-        job_defaults = {job.key: job.default for job in JOBS}
-        jobs_by_key = {job.key: job for job in JOBS}
-        self.jobs_vars: dict[UIField, ttk.BooleanVar] = {}
-
-        def place_extras_controls(
-            parent: tk.Misc, combo_config: ComboConfig, combo_field: UIField, job: JobConfig
-        ) -> None:
-            short_label = _JOB_SPINBOX_LABELS.get(combo_field, combo_config.label)
-            label = ttk.Label(parent, text=short_label)
-            label.pack(side=LEFT, padx=(0, 4))
-            self._job_row_extras.setdefault(job.key, []).append(label)
-
-            if not all(isinstance(v, int) for v in combo_config.values):
-                # Text choices (e.g. the deck hero card): a readonly picker instead of a spinbox.
-                combo_var = ttk.StringVar(value=str(combo_config.default))
-                combo = self._picker_combobox(
-                    parent,
-                    textvariable=combo_var,
-                    values=[str(v) for v in combo_config.values],
-                    width=combo_config.size[0],
-                )
-                combo.pack(side=LEFT)
-                combo.bind("<<ComboboxSelected>>", self._notify_config_change_event)
-                self._register_config_widget(combo_field.value, combo)
-                self._job_extra_spinboxes[job.key] = combo
-                self._job_row_extras.setdefault(job.key, []).append(combo)
-                if combo_config.tooltip:
-                    ToolTip(combo, combo_config.tooltip)
-                if combo_field == UIField.DECK_HERO_CARD:
-                    self.deck_hero_card_var = combo_var
-                return
-
-            spin_var = ttk.StringVar(value=str(combo_config.default))
-            spinbox = ttk.Spinbox(
+        if not all(isinstance(v, int) for v in combo_config.values):
+            # Text choices (e.g. the deck hero card): a readonly picker instead of a spinbox.
+            combo_var = ttk.StringVar(value=str(combo_config.default))
+            combo = self._picker_combobox(
                 parent,
-                from_=int(min(combo_config.values)),
-                to=int(max(combo_config.values)),
-                width=3,
-                textvariable=spin_var,
-                command=self._notify_config_change,
-                state=READONLY,
+                textvariable=combo_var,
+                values=[str(v) for v in combo_config.values],
+                width=combo_config.size[0],
             )
-            spinbox.pack(side=LEFT)
-            self._trace_variable(spin_var)
-            self._register_config_widget(combo_field.value, spinbox)
-            self._job_extra_spinboxes[job.key] = spinbox
-            self._job_row_extras.setdefault(job.key, []).append(spinbox)
-
+            combo.pack(side=LEFT)
+            combo.bind("<<ComboboxSelected>>", self._notify_config_change_event)
+            self._register_config_widget(combo_field.value, combo)
+            self._job_extra_spinboxes[job.key] = combo
+            self._job_row_extras.setdefault(job.key, []).append(combo)
             if combo_config.tooltip:
-                info_label = ttk.Label(parent, text="ⓘ", bootstyle="info")
-                info_label.pack(side=LEFT, padx=(4, 0))
-                ToolTip(info_label, combo_config.tooltip)
-                self._job_row_extras.setdefault(job.key, []).append(info_label)
+                ToolTip(combo, combo_config.tooltip)
+            if combo_field == UIField.DECK_HERO_CARD:
+                self.deck_hero_card_var = combo_var
+            return
 
-            if combo_field == UIField.DECK_NUMBER_SELECTION:
-                self.deck_var = spin_var
-            elif combo_field == UIField.MAX_DECK_SELECTION:
-                self.max_deck_var = spin_var
-            elif combo_field == UIField.MAX_ACCOUNT_SELECTION:
-                self.max_account_var = spin_var
+        spin_var = ttk.StringVar(value=str(combo_config.default))
+        spinbox = ttk.Spinbox(
+            parent,
+            from_=int(min(combo_config.values)),
+            to=int(max(combo_config.values)),
+            width=3,
+            textvariable=spin_var,
+            command=self._notify_config_change,
+            state=READONLY,
+        )
+        spinbox.pack(side=LEFT)
+        self._trace_variable(spin_var)
+        self._register_config_widget(combo_field.value, spinbox)
+        self._job_extra_spinboxes[job.key] = spinbox
+        self._job_row_extras.setdefault(job.key, []).append(spinbox)
 
-        def place_job_toggle(
-            parent: tk.Misc,
-            *,
-            field: UIField,
-            text: str,
-            tooltip: str = "",
-            row_index: int | None = None,
-            command: Callable[[], None] | None = None,
-        ) -> ttk.Checkbutton:
-            var = ttk.BooleanVar(value=self._job_toggle_default(field, job_defaults))
+        if combo_config.tooltip:
+            info_label = ttk.Label(parent, text="ⓘ", bootstyle="info")
+            info_label.pack(side=LEFT, padx=(6, 0))
+            ToolTip(info_label, combo_config.tooltip)
+            self._job_row_extras.setdefault(job.key, []).append(info_label)
 
-            def on_toggle() -> None:
-                self._sync_job_toggle_appearance(field)
-                if command:
-                    command()
-                else:
-                    self._notify_config_change()
+        if combo_field == UIField.DECK_NUMBER_SELECTION:
+            self.deck_var = spin_var
+        elif combo_field == UIField.MAX_DECK_SELECTION:
+            self.max_deck_var = spin_var
+        elif combo_field == UIField.MAX_ACCOUNT_SELECTION:
+            self.max_account_var = spin_var
 
-            checkbox = ttk.Checkbutton(
-                parent,
-                text=text,
-                variable=var,
-                bootstyle=_JOB_TOGGLE_ON_STYLE,
-                command=on_toggle,
-            )
-            if row_index is None:
-                checkbox.pack(side=LEFT)
-            else:
-                checkbox.grid(row=row_index, column=0, sticky="w", pady=2)
-            if tooltip:
-                ToolTip(checkbox, tooltip)
-            self.jobs_vars[field] = var
-            self._job_toggle_checkbuttons[field] = checkbox
-            self._trace_variable(var)
-            self._register_config_widget(field.value, checkbox)
+    def _place_job_toggle(
+        self,
+        parent: tk.Misc,
+        *,
+        field: UIField,
+        text: str,
+        tooltip: str = "",
+        row_index: int,
+        command: Callable[[], None] | None = None,
+    ) -> ttk.Checkbutton:
+        var = ttk.BooleanVar(value=self._job_toggle_default(field, self._job_defaults))
+
+        def on_toggle() -> None:
             self._sync_job_toggle_appearance(field)
-            return checkbox
+            if command:
+                command()
+            else:
+                self._notify_config_change()
 
-        def add_job_row(section_frame: ttk.Labelframe, job: JobConfig, row_index: int) -> int:
-            """Place one job row; returns the next free row index."""
-            if job.extras:
-                # Toggle on row 1; number picker indented below (fits narrow columns).
-                combo_config = next(iter(job.extras.values()))
-                combo_field = combo_config.key
-                place_job_toggle(
-                    section_frame,
-                    field=job.key,
-                    text=job.title,
-                    tooltip=job.tooltip,
-                    row_index=row_index,
-                    command=lambda j=job.key: self._on_job_with_extra_toggle(j),
-                )
+        checkbox = ttk.Checkbutton(
+            parent,
+            text=text,
+            variable=var,
+            bootstyle=_JOB_TOGGLE_ON_STYLE,
+            command=on_toggle,
+        )
+        checkbox.grid(row=row_index, column=0, sticky="w", pady=3)
+        if tooltip:
+            ToolTip(checkbox, tooltip)
+        self.jobs_vars[field] = var
+        self._job_toggle_checkbuttons[field] = checkbox
+        self._trace_variable(var)
+        self._register_config_widget(field.value, checkbox)
+        self._sync_job_toggle_appearance(field)
+        return checkbox
 
-                extras = ttk.Frame(section_frame)
-                extras.grid(
-                    row=row_index + 1,
-                    column=0,
-                    sticky="w",
-                    padx=(22, 0),
-                    pady=(0, 4),
-                )
-                place_extras_controls(extras, combo_config, combo_field, job)
-                self._sync_job_extra_spinboxes()
-                return row_index + 2
-
-            place_job_toggle(
+    def _add_job_row(self, section_frame: ttk.Labelframe, job: JobConfig, row_index: int) -> int:
+        """Place one job toggle (plus its number/hero picker, indented below); returns the next free row."""
+        if job.extras:
+            combo_config = next(iter(job.extras.values()))
+            self._place_job_toggle(
                 section_frame,
                 field=job.key,
                 text=job.title,
                 tooltip=job.tooltip,
                 row_index=row_index,
+                command=lambda j=job.key: self._on_job_with_extra_toggle(j),
             )
-            return row_index + 1
+            extras = ttk.Frame(section_frame)
+            extras.grid(row=row_index + 1, column=0, sticky="w", padx=(30, 0), pady=(0, 6))
+            self._place_extras_controls(extras, combo_config, combo_config.key, job)
+            self._sync_job_extra_spinboxes()
+            return row_index + 2
 
-        column_padx = ((0, 5), (5, 0))
-        for column_index, sections in enumerate(_JOB_TAB_COLUMNS):
-            column_frame = ttk.Frame(columns_frame)
-            column_frame.grid(row=0, column=column_index, sticky="nsew", padx=column_padx[column_index])
-            column_frame.columnconfigure(0, weight=1)
-
-            for section_title, job_keys in sections:
-                section_frame = self._section_labelframe(column_frame, section_title)
-                section_frame.pack(fill=X, pady=(0, 6))
-
-                grid_row = 0
-                for job_key in job_keys:
-                    job = jobs_by_key[job_key]
-                    grid_row = add_job_row(section_frame, job, grid_row)
-                    if job_key == UIField.DEBUG_VIEW_USER_TOGGLE:
-                        grid_row = self._add_debug_view_button(section_frame, grid_row)
-
-        self._sync_all_job_toggle_appearances()
+        self._place_job_toggle(section_frame, field=job.key, text=job.title, tooltip=job.tooltip, row_index=row_index)
+        return row_index + 1
 
     def _add_debug_view_button(self, parent: tk.Misc, row_index: int) -> int:
         """'Open debug view' under the Debug view toggle; visible only while the toggle is on.
@@ -952,7 +1349,9 @@ class PyClashBotUI(ttk.Window):
         return stored
 
     def _create_emulator_tab(self) -> None:
-        content = self._prepare_tab_page(self.emulator_tab)
+        content = self._prepare_tab_page(
+            self.emulator_tab, "Emulator", "Which emulator the bot drives, and its device / render settings."
+        )
 
         connection_section = self._section_labelframe(content, "Emulator")
         connection_section.pack(fill=X, pady=(0, 6))
@@ -1201,10 +1600,13 @@ class PyClashBotUI(ttk.Window):
         self._register_config_widget(field.value, toggle)
 
     def _create_session_tab(self) -> None:
-        content = self._prepare_tab_page(self.session_tab)
+        content = self._prepare_tab_page(
+            self.session_tab, "Session", "When the bot starts, when it stops, and where it reports."
+        )
+        cards = ResponsiveGrid(content, min_column_width=340, gap=_GAP)
+        cards.pack(fill=X)
 
-        startup = self._section_labelframe(content, "Startup")
-        startup.pack(fill=X, pady=(0, 6))
+        startup = cards.add(self._section_labelframe(cards, "Startup"))
         self._session_spinbox(
             startup,
             UIField.STARTUP_DELAY_SECONDS,
@@ -1213,8 +1615,7 @@ class PyClashBotUI(ttk.Window):
             "Gives you time to start a VPN or network accelerator before the emulator boots.",
         )
 
-        limits = self._section_labelframe(content, "Limits (0 = no limit)")
-        limits.pack(fill=X, pady=(0, 6))
+        limits = cards.add(self._section_labelframe(cards, "Limits (0 = no limit)"))
         self._session_spinbox(
             limits,
             UIField.MAX_BATTLES_PER_SESSION,
@@ -1230,8 +1631,7 @@ class PyClashBotUI(ttk.Window):
             "Stop the bot after it has run this many minutes.",
         )
 
-        schedule = self._section_labelframe(content, "Schedule")
-        schedule.pack(fill=X, pady=(0, 6))
+        schedule = cards.add(self._section_labelframe(cards, "Schedule"))
         self._session_toggle(schedule, UIField.SCHEDULE_TOGGLE, "Only run during active hours")
         hours = ttk.Frame(schedule)
         hours.pack(fill=X)
@@ -1244,10 +1644,9 @@ class PyClashBotUI(ttk.Window):
             self.session_vars[field] = var
             self._trace_variable(var)
             self._register_config_widget(field.value, spin)
-        ttk.Label(hours, text="(24h, local time)", font=("TkDefaultFont", 8), bootstyle="secondary").pack(side=LEFT)
+        ttk.Label(hours, text="(24h, local time)", style=_MUTED_LABEL_STYLE, font=self._fonts["small"]).pack(side=LEFT)
 
-        webhook = self._section_labelframe(content, "Discord notifications")
-        webhook.pack(fill=X)
+        webhook = cards.add(self._section_labelframe(cards, "Discord notifications"))
         self._session_toggle(webhook, UIField.DISCORD_WEBHOOK_TOGGLE, "Post session start/end summaries")
         url_row = ttk.Frame(webhook)
         url_row.pack(fill=X)
@@ -1270,7 +1669,7 @@ class PyClashBotUI(ttk.Window):
             self._test_webhook_callback(str(self.session_vars[UIField.DISCORD_WEBHOOK_URL].get()).strip())
 
     def _create_stats_tab(self) -> None:
-        content = self._prepare_tab_page(self.stats_tab)
+        content = self._prepare_tab_page(self.stats_tab, "Stats", "Everything counted this session.")
         content.columnconfigure(0, weight=1, uniform="stats_cols")
         content.columnconfigure(1, weight=1, uniform="stats_cols")
 
@@ -1387,7 +1786,7 @@ class PyClashBotUI(ttk.Window):
             self.stat_labels[field] = var
 
     def _create_misc_tab(self) -> None:
-        content = self._prepare_tab_page(self.misc_tab)
+        content = self._prepare_tab_page(self.misc_tab, "Settings", "Appearance, data, recordings and links.")
 
         appearance = self._section_labelframe(content, "Appearance")
         appearance.pack(fill=X, pady=(0, 6))
@@ -1576,9 +1975,8 @@ class PyClashBotUI(ttk.Window):
 
     def _reapply_custom_styles(self) -> None:
         """Restore app-specific ttk styles after theme_use resets them."""
-        self._style.configure(f"{_TAB_SECTION_STYLE}.Label", anchor="center")
+        self._init_custom_styles()
         self._sync_brand_button_styles()
-        self._init_notebook_style()
 
     def _register_brand_button_style(self, style_name: str, background: str) -> None:
         colors = self._style.colors
@@ -1645,7 +2043,6 @@ class PyClashBotUI(ttk.Window):
         self._refresh_theme_colours()
         if self._button_state == "idle":
             self._sync_start_button_readiness()
-        self.after_idle(self._sync_notebook_tab_widths)
 
     def _label_foreground(self) -> str:
         try:
@@ -1690,28 +2087,15 @@ class PyClashBotUI(ttk.Window):
         }
 
     def _style_status_log(self) -> None:
-        try:
-            background = self._style.lookup("TEntry", "fieldbackground")
-            foreground = self._style.lookup("TEntry", "foreground")
-        except tk.TclError:
-            return
-
-        colors = getattr(self._style, "colors", None)
-        if not background and colors is not None:
-            background = getattr(colors, "input", "") or getattr(colors, "bg", "")
-        if not foreground and colors is not None:
-            foreground = getattr(colors, "fg", "")
-
-        if not background or not foreground:
-            return
-
+        """Footer status line: plain text on the chrome strip, not an input box."""
+        colours = self._theme_colours()
         self.event_log.configure(
-            background=background,
-            foreground=foreground,
+            background=colours["chrome"],
+            foreground=colours["fg"],
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            insertbackground=foreground,
+            insertbackground=colours["fg"],
         )
 
     def _refresh_theme_colours(self) -> None:
@@ -1740,6 +2124,7 @@ class PyClashBotUI(ttk.Window):
             self.win_gauge.set_colours(gauge_fg, gauge_bg, gauge_text, canvas_bg=canvas_bg)
         if self._job_toggle_checkbuttons:
             self._sync_all_job_toggle_appearances()
+        self._sync_status_pill()
 
     def _on_theme_change(self, _event: object | None = None) -> None:
         self._apply_theme(self.theme_var.get(), skip_variable_update=True)

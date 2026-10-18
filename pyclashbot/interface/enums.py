@@ -131,7 +131,7 @@ BOT_STAT_LABELS: dict[BotStatField, str] = {
 BOT_STAT_FIELDS: tuple[BotStatField, ...] = tuple(BOT_STAT_LABELS.keys())
 
 # Jobs that count toward starting the bot — must match the Battles, Clan chat, and
-# Collection sections on the Jobs tab (_JOB_TAB_COLUMNS in ui.py).
+# Collection sections on the Jobs page (_JOB_SECTIONS in ui.py).
 START_JOB_GROUPS: tuple[tuple[UIField, ...], ...] = (
     (
         UIField.CLASSIC_1V1_USER_TOGGLE,

@@ -48,7 +48,7 @@ from pyclashbot.emulators.base import EmulatorNotReadyError
 from pyclashbot.emulators.bluestacks import BlueStacksEmulatorController
 from pyclashbot.emulators.google_play import GooglePlayEmulatorController
 from pyclashbot.interface.enums import UIField, has_start_ready_job
-from pyclashbot.interface.ui import PyClashBotUI, no_jobs_popup
+from pyclashbot.interface.ui import PAGE_DASHBOARD, PyClashBotUI, no_jobs_popup
 from pyclashbot.utils.caching import USER_SETTINGS_CACHE
 from pyclashbot.utils.cli_config import arg_parser
 from pyclashbot.utils.discord_rpc import DiscordRPCManager
@@ -246,7 +246,7 @@ def start_button_event(
     save_current_settings(values)
     logger.log_job_dictionary(job_dictionary)
 
-    ui.notebook.select(ui.stats_tab)
+    ui.show_page(PAGE_DASHBOARD)
 
     process = WorkerProcess(job_dictionary, stats_queue, shutdown_event, log_name, pause_event)
     process.start()
