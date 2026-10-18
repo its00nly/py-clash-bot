@@ -32,13 +32,20 @@ def _hists(seed: int, scale: int = 0) -> np.ndarray:
     return base
 
 
+def test_store_discards_older_format(tmp_path):
+    path = tmp_path / "learned_cards.json"
+    path.write_text(json.dumps({"ice_spirit": [_hists(1).tolist(), _hists(1, scale=20).tolist()]}), encoding="utf-8")
+    assert cd.LearnedCardStore(str(path)).samples == {}
+
+
 def test_store_round_trip(tmp_path):
     path = tmp_path / "learned_cards.json"
     store = cd.LearnedCardStore(str(path))
     store.add("hero_balloon", _hists(1))
     store.add("hero_balloon", _hists(1, scale=20))
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert list(data) == ["hero_balloon"] and len(data["hero_balloon"]) == 2
+    assert data["version"] == cd.LEARNED_FORMAT_VERSION
+    assert list(data["cards"]) == ["hero_balloon"] and len(data["cards"]["hero_balloon"]) == 2
     again = cd.LearnedCardStore(str(path))
     assert again.is_active("hero_balloon")
     assert np.array_equal(again.samples["hero_balloon"][0], _hists(1))

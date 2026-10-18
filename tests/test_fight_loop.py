@@ -683,6 +683,15 @@ def test_rotation_resolve_learns_without_an_elixir_match(env):
     assert "Learned card art for evo_lumberjack" in logger.logs
 
 
+def test_rotation_guess_contradicted_by_elixir_learns_nothing(env):
+    clock, _, _ = env
+    ctx = fight.FightContext(_DeckBrain(_Emulator(clock, lambda n: _Spec())))
+    for nudge in (0, 20):  # rotation says ice_spirit (1) but 5 elixir went: it was the Balloon
+        frame = _learning_play(ctx, clock, "ice_spirit", 7, _art(3, nudge), rotation_label="ice_spirit")
+        ctx._verify(_Logger(), fight.TickFrame(frame, clock.now + 1, True, 2, [0, 1, 2, 3]))
+    assert fight.card_detection.learned_store().samples == {}
+
+
 def test_learning_context_skips_greyed_and_known_slots(env):
     clock, _, _ = env
     ctx = fight.FightContext(_DeckBrain(_Emulator(clock, lambda n: _Spec())))

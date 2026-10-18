@@ -11813,6 +11813,9 @@ def slot_chroma(iar, slot: int) -> float:
 # Matching uses the static DB's L1 distance and accept rule (hard threshold or ratio margin).
 
 LEARNED_CARDS_FILE = "learned_cards.json"
+# Bumped when learning rules change so samples learned under the old rules are dropped.
+# v2: v1 could learn from the deck-rotation guess alone and taught Hero Balloon as ice_spirit.
+LEARNED_FORMAT_VERSION = 2
 LEARNED_MAX_SAMPLES = 4
 LEARNED_AGREE_DISTANCE = CARD_MATCH_THRESHOLD
 LEARNED_MIN_AGREEING = 2
@@ -11857,8 +11860,11 @@ class LearnedCardStore:
             return
         try:
             with open(self.path, encoding="utf-8") as f:
-                raw = json.load(f)
-            for card, entries in dict(raw).items():
+                raw = dict(json.load(f))
+            if raw.get("version") != LEARNED_FORMAT_VERSION or not isinstance(raw.get("cards"), dict):
+                _learned_log.warning("Learned card art: discarding %s from an older version", self.path)
+                return
+            for card, entries in raw["cards"].items():
                 hists = [numpy.asarray(e, dtype=numpy.int32) for e in entries]
                 hists = [h for h in hists if h.shape == (4, _N_COLORS)]
                 if hists:
@@ -11872,7 +11878,8 @@ class LearnedCardStore:
             return
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            data = {card: [h.tolist() for h in hists] for card, hists in self.samples.items()}
+            cards = {card: [h.tolist() for h in hists] for card, hists in self.samples.items()}
+            data = {"version": LEARNED_FORMAT_VERSION, "cards": cards}
             tmp = f"{self.path}.{os.getpid()}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f)

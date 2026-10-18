@@ -659,12 +659,17 @@ class FightContext:
             return
         label = pending.card_id
         base = card_detection.base_card_id(label)
-        confident = pending.rotation_label is not None and card_detection.base_card_id(pending.rotation_label) == base
+        if pending.elixir_before is None or frame.elixir is None:
+            return  # the elixir drop is the only independent witness; without it, learn nothing
+        drop = pending.elixir_before - frame.elixir
+        # The rotation guess alone once taught Hero Balloon's art as ice_spirit (a wrong rotation
+        # feeds on its own misreads), so it must agree with the elixir spent: the card's cost, or
+        # one less when elixir ticked up during the settle.
+        rotation_ok = pending.rotation_label is not None and card_detection.base_card_id(pending.rotation_label) == base
+        confident = rotation_ok and card_cost(label) - 1 <= drop <= card_cost(label)
         if not confident and pending.learn_pool is not None:
-            if pending.elixir_before is not None and frame.elixir is not None:
-                drop = pending.elixir_before - frame.elixir
-                same_cost = [c for c in pending.learn_pool if card_cost(c) == drop]
-                confident = drop == card_cost(label) and same_cost == [base]
+            same_cost = [c for c in pending.learn_pool if card_cost(c) == drop]
+            confident = drop == card_cost(label) and same_cost == [base]
         if not confident:
             return
         try:

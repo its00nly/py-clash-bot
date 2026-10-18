@@ -135,6 +135,11 @@ def detect_upgradable_cards(emulator):
 _ENEMY_BADGE_BGR = (np.array([22, 0, 85]), np.array([48, 14, 130]))
 _ENEMY_HP_BAR_BGR = (np.array([120, 65, 235]), np.array([165, 110, 255]))
 _MIN_ENEMY_MARKER_AREA = 8
+# Marker blobs this close belong to one unit (badge + HP bar + occlusion fragments): merged.
+_ENEMY_MERGE_PX = 22
+# A merged unit smaller than this is a speck (one or two matching pixels, ~9 px after dilation):
+# on the overnight run 60% of "defensive" plays answered such specks, mostly on pink troop bodies.
+_MIN_ENEMY_UNIT_AREA = 20
 # The badge floats above the unit; shift down so the point lands on the troop itself.
 _BADGE_TO_BODY_DY = 15
 
@@ -165,14 +170,25 @@ def find_enemy_units(iar: np.ndarray | None) -> list[EnemyUnit]:
     mask = cv2.bitwise_or(cv2.inRange(crop, *_ENEMY_BADGE_BGR), cv2.inRange(crop, *_ENEMY_HP_BAR_BGR))
     mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
     count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    blobs = sorted(
+        (
+            (int(stats[i][cv2.CC_STAT_AREA]), int(centroids[i][0]) + left, int(centroids[i][1]) + top)
+            for i in range(1, count)
+            if stats[i][cv2.CC_STAT_AREA] >= _MIN_ENEMY_MARKER_AREA
+        ),
+        reverse=True,
+    )
+    # Greedy merge, biggest blob first: it anchors the unit's position, fragments add to its size.
+    clusters: list[list[int]] = []  # [x, y, total_area]
+    for area, x, y in blobs:
+        for cluster in clusters:
+            if abs(cluster[0] - x) <= _ENEMY_MERGE_PX and abs(cluster[1] - y) <= _ENEMY_MERGE_PX:
+                cluster[2] += area
+                break
+        else:
+            clusters.append([x, y, area])
     units = [
-        EnemyUnit(
-            x=int(centroids[i][0]) + left,
-            y=int(centroids[i][1]) + top + _BADGE_TO_BODY_DY,
-            size=int(stats[i][cv2.CC_STAT_AREA]),
-        )
-        for i in range(1, count)
-        if stats[i][cv2.CC_STAT_AREA] >= _MIN_ENEMY_MARKER_AREA
+        EnemyUnit(x=x, y=y + _BADGE_TO_BODY_DY, size=area) for x, y, area in clusters if area >= _MIN_ENEMY_UNIT_AREA
     ]
     return sorted(units, key=lambda u: u.y, reverse=True)
 
