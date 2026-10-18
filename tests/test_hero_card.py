@@ -338,3 +338,54 @@ def test_do_fight_state_forwards_the_hero(monkeypatch):
     logger: Any = _Logger()
     fight.do_fight_state(None, logger, False, "Classic 1v1", smart_battle=True, hero_card=HERO)
     assert seen and seen[0][-1] == HERO
+
+
+# ---- tempo: Giant Skeleton + Balloon, low-tower reserve -------------------------------------
+
+
+@pytest.mark.parametrize("balloon", [HERO, "UNKNOWN"])  # remembered/learned, or resolved by the hint
+def test_giant_skeleton_starts_at_8_with_the_balloon_in_hand(balloon):
+    for seed in range(5):
+        hand = {0: balloon, 1: "giant_skeleton", 2: "arrows", 3: "ice_spirit"}
+        play = _choose(_brain(seed=seed), hand, 8)
+        assert play is not None and play.card_id == "giant_skeleton", (seed, play)
+        assert play.coord == BACK_TANK_COORDS[play.lane]
+
+
+def test_giant_skeleton_still_waits_for_9_without_the_balloon():
+    for seed in range(5):
+        play = _choose(_brain(seed=seed), {0: "skeletons", 1: "giant_skeleton", 2: "arrows", 3: "ice_spirit"}, 8)
+        assert play is None or play.card_id != "giant_skeleton"
+
+
+def test_balloon_out_of_hand_unaffordable_still_counts_for_the_tank():
+    # A remembered Balloon in a greyed slot (not affordable) is still in hand: GS goes at 8.
+    brain = _brain()
+    full = {0: HERO, 1: "giant_skeleton", 2: "arrows", 3: "ice_spirit"}
+    playable = {1: "giant_skeleton", 2: "arrows", 3: "ice_spirit"}
+    play = brain.choose(playable, [], 60.0, elixir=8, full_hand=full, affordable=set(playable))
+    assert play is not None and play.card_id == "giant_skeleton"
+
+
+def _low_own_tower(brain: BattleBrain) -> None:
+    for _ in range(3):
+        brain.observe_towers(TowerHealth(enemy={"left": 1.0, "right": 1.0}, own={"left": 1.0, "right": 0.4}))
+
+
+def test_low_own_tower_keeps_a_4_elixir_reserve_before_a_push():
+    brain = _brain()
+    _low_own_tower(brain)
+    assert brain.reserve() >= 4
+    hand = {0: HERO, 1: "giant_skeleton", 2: "arrows", 3: "ice_spirit"}
+    for elixir in (8, 9):
+        play = _choose(brain, hand, elixir)
+        assert play is None or play.defensive or play.card_id != "giant_skeleton", (elixir, play)
+    play = _choose(_brain(), hand, 9)  # healthy towers: the same push goes
+    assert play is not None and play.card_id == "giant_skeleton"
+
+
+def test_low_own_tower_still_spends_at_full_elixir():
+    brain = _brain()
+    _low_own_tower(brain)
+    play = _choose(brain, {0: HERO, 1: "giant_skeleton", 2: "arrows", 3: "ice_spirit"}, 10)
+    assert play is not None

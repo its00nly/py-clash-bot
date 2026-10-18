@@ -1,4 +1,8 @@
+import json
+import logging
+import os
 import random
+import threading
 import time
 from collections import Counter
 
@@ -6,6 +10,7 @@ import cv2
 import numpy
 
 from pyclashbot.bot.coords import CHAMPION_ABILITY_DISMISS_COORD
+from pyclashbot.utils.platform import get_app_data_dir
 
 # Placement profiles: where on screen to tap (left/right), not card role in battle.
 # Shared arena zones use zone_* keys; card-named keys stay when only that card (or its evo) uses the region.
@@ -11779,7 +11784,12 @@ def _match_slot(iar, slot: int) -> tuple[str, int, int, list[tuple[str, int]], n
     pair = numpy.empty_like(sorted_d)
     numpy.put_along_axis(pair, numpy.asarray(idx, dtype=numpy.intp), sorted_d, axis=1)
     dists = pair.min(axis=0).astype(numpy.int64)  # (N,)
-    card, best, second, top3 = _decide(dists, allow_soft=_slot_chroma(iar, slot) >= CARD_SOFT_MIN_CHROMA)
+    allow_soft = _slot_chroma(iar, slot) >= CARD_SOFT_MIN_CHROMA
+    learned = learned_store().active_entries()
+    if learned:
+        card, best, second, top3 = _decide_with_learned(dists, hists, learned, allow_soft)
+    else:
+        card, best, second, top3 = _decide(dists, allow_soft=allow_soft)
     return card, best, second, top3, hists[0]
 
 
@@ -11787,6 +11797,195 @@ def _slot_chroma(iar, slot: int) -> float:
     x, y = toplefts[slot]
     crop = iar[y : y + TOTAL_HEIGHT, x : x + TOTAL_WIDTH]
     return float((crop.max(axis=2).astype(numpy.int16) - crop.min(axis=2)).mean())
+
+
+def slot_chroma(iar, slot: int) -> float:
+    """Mean per-pixel (max - min channel) of a hand slot: ~74-90 for a live card, ~0 when greyed."""
+    return _slot_chroma(iar, slot)
+
+
+# ===== Learned fingerprints =====================================================
+# Deck-specific hand art the static DB can't match (the Hero Balloon frame, evo frames) is
+# learned during battles: fight.py labels a verified play from a coloured UNKNOWN slot when the
+# label is certain (the elixir drop names the card, or the deck rotation does) and hands the
+# slot's pre-tap histograms to learn_card_sample. A card's samples are only matched once 2 of
+# them agree (<= LEARNED_AGREE_DISTANCE apart), so one mislabel never becomes a misread.
+# Matching uses the static DB's L1 distance and accept rule (hard threshold or ratio margin).
+
+LEARNED_CARDS_FILE = "learned_cards.json"
+LEARNED_MAX_SAMPLES = 4
+LEARNED_AGREE_DISTANCE = CARD_MATCH_THRESHOLD
+LEARNED_MIN_AGREEING = 2
+# Overrides the store's file (None = env PYCLASHBOT_LEARNED_CARDS, else <app data>/learned_cards.json).
+# PYCLASHBOT_LEARNED_CARDS=off keeps learned art in memory only.
+LEARNED_CARDS_PATH: str | None = None
+
+_learned_log = logging.getLogger(__name__)
+
+
+def learned_cards_path() -> str | None:
+    """Where learned fingerprints persist, or None for memory-only."""
+    if LEARNED_CARDS_PATH:
+        return LEARNED_CARDS_PATH
+    env = os.environ.get("PYCLASHBOT_LEARNED_CARDS")
+    if env is not None:
+        return None if env.strip().lower() in ("", "0", "off", "none") else env
+    return os.path.join(get_app_data_dir("py-clash-bot"), LEARNED_CARDS_FILE)
+
+
+def _hist_distance(a: numpy.ndarray, b: numpy.ndarray) -> int:
+    return int(numpy.abs(a.astype(numpy.int64) - b.astype(numpy.int64)).sum())
+
+
+class LearnedCardStore:
+    """``{card_id: [(4, 16) histograms...]}`` (at most LEARNED_MAX_SAMPLES per card), JSON-persisted.
+
+    Never raises on I/O: a missing or corrupt file is an empty store, a failed save is skipped.
+    """
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path
+        self.samples: dict[str, list[numpy.ndarray]] = {}
+        self._active: list[tuple[str, numpy.ndarray]] | None = None
+        self._lock = threading.Lock()
+        self.load()
+
+    def load(self) -> None:
+        self.samples = {}
+        self._active = None
+        if not self.path or not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                raw = json.load(f)
+            for card, entries in dict(raw).items():
+                hists = [numpy.asarray(e, dtype=numpy.int32) for e in entries]
+                hists = [h for h in hists if h.shape == (4, _N_COLORS)]
+                if hists:
+                    self.samples[str(card)] = hists[-LEARNED_MAX_SAMPLES:]
+        except (OSError, ValueError, TypeError) as exc:
+            _learned_log.warning("Learned card art: could not read %s (%s); starting empty", self.path, exc)
+            self.samples = {}
+
+    def save(self) -> None:
+        if not self.path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            data = {card: [h.tolist() for h in hists] for card, hists in self.samples.items()}
+            tmp = f"{self.path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            _learned_log.warning("Learned card art: could not save %s (%s)", self.path, exc)
+
+    @staticmethod
+    def _agreeing(hists: list[numpy.ndarray]) -> list[numpy.ndarray]:
+        """Samples that LEARNED_MIN_AGREEING - 1 other samples sit within LEARNED_AGREE_DISTANCE of."""
+        need = LEARNED_MIN_AGREEING - 1
+        return [
+            h
+            for i, h in enumerate(hists)
+            if sum(1 for j, o in enumerate(hists) if j != i and _hist_distance(h, o) <= LEARNED_AGREE_DISTANCE) >= need
+        ]
+
+    def is_active(self, card_id: str) -> bool:
+        return bool(self._agreeing(self.samples.get(card_id, [])))
+
+    def active_entries(self) -> list[tuple[str, numpy.ndarray]]:
+        """(card, histograms) pairs the matcher uses: only samples another sample agrees with."""
+        active = self._active
+        if active is None:
+            with self._lock:
+                active = [(card, h) for card, hists in self.samples.items() for h in self._agreeing(hists)]
+                self._active = active
+        return active
+
+    def add(self, card_id: str, hists) -> bool:
+        """Store one labelled sample; True when this made ``card_id`` active for the first time.
+
+        A sample within LEARNED_AGREE_DISTANCE of another card's active art is rejected (the two
+        cards would become indistinguishable). Over the cap the oldest non-agreeing sample goes first.
+        """
+        sample = _as_hist_array(hists).astype(numpy.int32).copy()
+        base = base_card_id(card_id)
+        for other, art in self.active_entries():
+            if base_card_id(other) != base and _hist_distance(sample, art) <= LEARNED_AGREE_DISTANCE:
+                return False
+        with self._lock:
+            was_active = self.is_active(card_id)
+            entries = self.samples.setdefault(card_id, [])
+            entries.append(sample)
+            while len(entries) > LEARNED_MAX_SAMPLES:
+                agreeing = {id(h) for h in self._agreeing(entries)}
+                drop = next((i for i, h in enumerate(entries) if id(h) not in agreeing), 0)
+                entries.pop(drop)
+            self._active = None
+            now_active = self.is_active(card_id)
+        self.save()
+        return now_active and not was_active
+
+
+_learned_store: LearnedCardStore | None = None
+
+
+def learned_store() -> LearnedCardStore:
+    """The process-wide learned-fingerprint store (loaded lazily from learned_cards_path())."""
+    global _learned_store
+    if _learned_store is None:
+        _learned_store = LearnedCardStore(learned_cards_path())
+    return _learned_store
+
+
+def set_learned_store(store: LearnedCardStore | None) -> None:
+    """Swap the process-wide store (tests); None reloads from learned_cards_path() on next use."""
+    global _learned_store
+    _learned_store = store
+
+
+def learn_card_sample(card_id: str, hists, chroma: float) -> bool:
+    """Teach the matcher one labelled slot crop; True when ``card_id`` just became recognisable.
+
+    Greyed (unaffordable, desaturated) crops are never learned: their art is not the card's.
+    """
+    if not card_id or card_id.upper().startswith("UNKNOWN") or chroma < CARD_SOFT_MIN_CHROMA:
+        return False
+    return learned_store().add(card_id, hists)
+
+
+_DB_BASE_IDS: list[str] = []
+
+
+def _db_base_ids() -> list[str]:
+    global _DB_BASE_IDS
+    names, _db, _bases = _get_db()
+    if len(_DB_BASE_IDS) != len(names):
+        _DB_BASE_IDS = [base_card_id(n) for n in names]
+    return _DB_BASE_IDS
+
+
+def _decide_with_learned(
+    dists: numpy.ndarray, hists: numpy.ndarray, learned: list[tuple[str, numpy.ndarray]], allow_soft: bool
+) -> tuple[str, int, int, list[tuple[str, int]]]:
+    """_decide over the static DB plus learned entries (same L1 metric, min over the search window)."""
+    names, _db, _bases = _get_db()
+    art = numpy.stack([h for _, h in learned]).reshape(len(learned), -1).astype(numpy.int64)  # (M, 64)
+    shifted = hists.reshape(len(hists), 1, -1).astype(numpy.int64)  # (S, 1, 64)
+    learned_d = numpy.abs(shifted - art[None]).sum(axis=2).min(axis=0)  # (M,)
+    all_names = names + [card for card, _ in learned]
+    all_bases = numpy.array(_db_base_ids() + [base_card_id(card) for card, _ in learned])
+    all_d = numpy.concatenate([dists.astype(numpy.int64), learned_d])
+    order = numpy.argsort(all_d, kind="stable")
+    best_i = int(order[0])
+    best = int(all_d[best_i])
+    other = all_d[all_bases != all_bases[best_i]]
+    second = int(other.min()) if other.size else best
+    top3 = [(all_names[int(i)], int(all_d[int(i)])) for i in order[:3]]
+    accept = best <= CARD_MATCH_THRESHOLD or (
+        allow_soft and best <= CARD_MATCH_SOFT_THRESHOLD and second >= CARD_MATCH_MIN_RATIO * best
+    )
+    return (all_names[best_i] if accept else "UNKNOWN"), best, second, top3
 
 
 purple_color = numpy.array([255, 43, 227])

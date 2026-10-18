@@ -148,3 +148,13 @@ def emulator(request: pytest.FixtureRequest, logger):
         pytest.exit(f"ABORTING: could not attach to the {backend} emulator", returncode=1)
 
     return emu
+
+
+@pytest.fixture(autouse=True)
+def _isolated_learned_cards():
+    """Card matching never reads or writes the user's learned_cards.json during tests."""
+    from pyclashbot.bot import card_detection
+
+    card_detection.set_learned_store(card_detection.LearnedCardStore(None))
+    yield
+    card_detection.set_learned_store(card_detection.LearnedCardStore(None))

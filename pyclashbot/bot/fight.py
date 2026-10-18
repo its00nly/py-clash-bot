@@ -488,6 +488,13 @@ class PendingPlay:
     fingerprint: Any
     tap_done_at: float
     raw_card_id: str | None = None  # the hand read before the brain resolved an UNKNOWN slot
+    remembered: bool = False  # the slot read UNKNOWN; its card came from FightContext.slot_memory
+    # Learned fingerprints (card_detection.learn_card_sample): the slot's pre-tap histograms when
+    # it read UNKNOWN in colour, plus what can confirm the label once the play is verified.
+    hist_before: Any = None
+    chroma_before: float = 0.0
+    rotation_label: str | None = None  # DeckTracker.resolve_unknown(slot) at decision time
+    learn_pool: frozenset[str] | None = None  # deck cards not visible in the other slots (full deck only)
 
 
 class DecisionLog:
@@ -552,6 +559,12 @@ class FightContext:
         self.last_status_at = -1e9
         self.last_decision_key: Any = None
         self.last_decision_at = -1e9
+        # Hand slot memory: a card stays in its slot until that slot is played, so a slot that
+        # read a known card keeps it while it later reads UNKNOWN (greyed when unaffordable).
+        self.slot_memory: dict[int, str] = {}
+        # Base id of the card last deployed from each slot: it can't be in that slot any more.
+        self.slot_last_deployed: dict[int, str] = {}
+        self.learned_logged: set[str] = set()
 
     @property
     def smart(self) -> bool:
@@ -590,6 +603,77 @@ class FightContext:
         enemy = (bool(frame.enemies) or frame.threat is not None) if self.smart else None
         self.ability.tick(emulator, logger, frame.iar, now, enemy)
         return "ok"
+
+    def remember_hand(
+        self, hand: dict[int, str], full_hand: dict[int, str] | None
+    ) -> tuple[dict[int, str], dict[int, str] | None, dict[int, str]]:
+        """Fill UNKNOWN slots from slot memory; remember every slot that reads a known card.
+
+        Returns (playable hand, full hand, {slot: remembered card}). Affordability is untouched:
+        the playable hand keeps exactly the slots it had.
+        """
+        source = full_hand if full_hand is not None else hand
+        remembered: dict[int, str] = {}
+        for slot, card in source.items():
+            if _is_unknown(card):
+                if slot in self.slot_memory:
+                    remembered[slot] = self.slot_memory[slot]
+            elif card_detection.base_card_id(card) != self.slot_last_deployed.get(slot):
+                self.slot_memory[slot] = card  # (the card just played from here is a stale frame)
+
+        def fill(cards: dict[int, str]) -> dict[int, str]:
+            return {i: remembered.get(i, c) if _is_unknown(c) else c for i, c in cards.items()}
+
+        return fill(hand), (fill(full_hand) if full_hand is not None else None), remembered
+
+    def learning_context(self, iar, slot: int, raw_card: str | None, card_id: str, full_hand) -> dict[str, Any]:
+        """PendingPlay fields for learning the art of a coloured UNKNOWN slot played as ``card_id``."""
+        if iar is None or not _is_unknown(raw_card) or _is_unknown(card_id):
+            return {}
+        try:
+            chroma = card_detection.slot_chroma(iar, slot)
+            if chroma < card_detection.CARD_SOFT_MIN_CHROMA:
+                return {}  # greyed: never learned
+            context: dict[str, Any] = {
+                "hist_before": card_detection.slot_histograms(iar, slot),
+                "chroma_before": chroma,
+            }
+            deck = getattr(self.brain, "deck", None)
+            if deck is not None and callable(getattr(deck, "resolve_unknown", None)):
+                context["rotation_label"] = deck.resolve_unknown(slot)
+            deck_cards = list(getattr(deck, "deck", None) or [])
+            if len(deck_cards) >= 8:
+                visible = {
+                    card_detection.base_card_id(c)
+                    for i, c in (full_hand or {}).items()
+                    if i != slot and not _is_unknown(c)
+                }
+                context["learn_pool"] = frozenset(c for c in deck_cards if c not in visible)
+            return context
+        except Exception:  # learning is a bonus; never let it break a play
+            return {}
+
+    def _learn_from(self, logger, pending: PendingPlay, frame: TickFrame) -> None:
+        """After a verified deploy: label the slot's pre-tap art when the label is certain."""
+        if pending.hist_before is None or _is_unknown(pending.card_id):
+            return
+        label = pending.card_id
+        base = card_detection.base_card_id(label)
+        confident = pending.rotation_label is not None and card_detection.base_card_id(pending.rotation_label) == base
+        if not confident and pending.learn_pool is not None:
+            if pending.elixir_before is not None and frame.elixir is not None:
+                drop = pending.elixir_before - frame.elixir
+                same_cost = [c for c in pending.learn_pool if card_cost(c) == drop]
+                confident = drop == card_cost(label) and same_cost == [base]
+        if not confident:
+            return
+        try:
+            learned = card_detection.learn_card_sample(label, pending.hist_before, pending.chroma_before)
+        except Exception:
+            return
+        if learned and label not in self.learned_logged:
+            self.learned_logged.add(label)
+            logger.log(f"Learned card art for {label}")
 
     def slot_blocked(self, slot: int, now: float) -> bool:
         """True while ``slot`` is backing off after a play that did not deploy."""
@@ -644,6 +728,13 @@ class FightContext:
         deployed = dropped or changed
         if deployed:
             self.deployed += 1
+            # A new card (from 'Next') fills the slot: forget what it held.
+            self.slot_memory.pop(pending.slot, None)
+            if not _is_unknown(pending.card_id):
+                self.slot_last_deployed[pending.slot] = card_detection.base_card_id(pending.card_id)
+            else:
+                self.slot_last_deployed.pop(pending.slot, None)
+            self._learn_from(logger, pending, frame)
         else:
             self.not_deployed += 1
             now = frame.captured_at
@@ -654,7 +745,9 @@ class FightContext:
         if self.brain is not None:
             _brain_record(self.brain, pending.play, deployed)
 
-    def log_decision(self, frame: TickFrame, hand, full_hand, threats, play, tick_start: float) -> None:
+    def log_decision(
+        self, frame: TickFrame, hand, full_hand, threats, play, tick_start: float, remembered=None
+    ) -> None:
         """One JSONL line per play or change of hold reason / situation, else at most once a second."""
         if self.decision_log is None:
             return
@@ -672,6 +765,7 @@ class FightContext:
                 "own": {lane: brain.own_tower_hp(lane) for lane in ("left", "right")},
             }
         slots = full_hand if full_hand is not None else hand
+        remembered = remembered or {}
         chosen = None
         if play is not None:
             chosen = {
@@ -687,7 +781,10 @@ class FightContext:
                 "t": round(time.time(), 3),
                 "elapsed": round(self.match_clock(frame.captured_at), 2),
                 "elixir": frame.elixir,
-                "hand": {str(i): {"card": c, "affordable": i in hand} for i, c in sorted(slots.items())},
+                "hand": {
+                    str(i): {"card": c, "affordable": i in hand, **({"remembered": True} if i in remembered else {})}
+                    for i, c in sorted(slots.items())
+                },
                 "threats": _units_json(threats),
                 "friends": _units_json(frame.friends),
                 "threat": _units_json([frame.threat])[0] if frame.threat is not None else None,
@@ -710,6 +807,7 @@ class FightContext:
         towers=None,
         play=None,
         phase: str | None = None,
+        remembered=None,
     ) -> None:
         """Hand this tick's already-computed values to the debug view. Never raises; logs once."""
         if self.debug_sink is None:
@@ -733,6 +831,7 @@ class FightContext:
                 phase=phase,
                 elapsed=self.match_clock(frame.captured_at),
                 in_battle=frame.in_battle,
+                remembered=remembered,
             )
             self.debug_sink.submit(frame.iar, info)
         except Exception as exc:  # the debug view must never break a battle
@@ -1083,7 +1182,10 @@ def play_smart_card(
 
     iar = frame.iar
     scores: list = []
-    read_hand, full_hand = _identify_hand(emulator, iar, card_indices, scores)
+    raw_hand, full_hand = _identify_hand(emulator, iar, card_indices, scores)
+    read_hand, remembered = raw_hand, {}
+    if ctx is not None:
+        read_hand, full_hand, remembered = ctx.remember_hand(raw_hand, full_hand)
     hand = read_hand
     if ctx is not None:
         # A slot backing off after a failed deploy stays affordable for the deck tracker but isn't played.
@@ -1098,7 +1200,7 @@ def play_smart_card(
     clock = ctx.match_clock(frame.captured_at) if ctx is not None else None
     play = _brain_choose(brain, hand, threats, elapsed, frame.elixir, friends, clock, full_hand, set(read_hand))
     if ctx is not None:
-        ctx.log_decision(frame, read_hand, full_hand, threats, play, tick_start)
+        ctx.log_decision(frame, read_hand, full_hand, threats, play, tick_start, remembered)
         ctx.publish_debug(
             frame,
             tick_start,
@@ -1108,6 +1210,7 @@ def play_smart_card(
             towers=towers,
             play=play,
             phase=battle_strategy.get_battle_phase(),
+            remembered=remembered,
         )
     if play is None:
         if ctx is not None:
@@ -1119,6 +1222,12 @@ def play_smart_card(
     logger.change_status(f"Playing {play.card_id} — {play.reason}")
     logger.log(f"Board: {brain.situation}")
     fingerprint = _slot_fingerprint(iar, play.index)
+    # The slot's art is captured from this (pre-tap) frame: after the tap the card is raised/gone.
+    learning = (
+        ctx.learning_context(iar, play.index, raw_hand.get(play.index), play.card_id, full_hand)
+        if ctx is not None
+        else {}
+    )
     _tap_card(emulator, HAND_CARDS_COORDS[play.index], play.coord)
     tap_done_at = time.monotonic()
     if recording_flag:
@@ -1128,8 +1237,17 @@ def play_smart_card(
         brain.record(play)
     else:
         ctx.plays += 1
+        raw_card = raw_hand.get(play.index)
         ctx.pending = PendingPlay(
-            play, play.index, play.card_id, frame.elixir, fingerprint, tap_done_at, read_hand.get(play.index)
+            play,
+            play.index,
+            play.card_id,
+            frame.elixir,
+            fingerprint,
+            tap_done_at,
+            raw_card,
+            remembered=play.index in remembered,
+            **learning,
         )
     return True
 

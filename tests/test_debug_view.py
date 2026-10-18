@@ -160,6 +160,46 @@ def test_sink_history_ring_wraps(tmp_path, frame):
     assert json.loads((history / "002.json").read_text(encoding="utf-8"))["n"] == 2
 
 
+def test_sink_saves_raw_frames_in_a_bounded_ring(tmp_path, frame):
+    sink, _ = _sink(tmp_path, max_fps=0, history=5, raw_history=2)
+    for n in range(3):
+        varied = frame.copy()
+        varied[0, 0] = (n, n, n)
+        sink.submit(varied, {"n": n})
+        sink.process_pending()
+    raw = tmp_path / "raw"
+    assert sorted(p.name for p in raw.glob("*.png")) == ["000.png", "001.png"]
+    img = cv2.imread(str(raw / "000.png"))
+    assert img is not None and img.shape == frame.shape  # native size, unannotated
+    assert tuple(img[0, 0]) == (2, 2, 2) and np.array_equal(img[1:], frame[1:])  # lossless, newest wins
+    meta = json.loads((tmp_path / "history" / "002.json").read_text(encoding="utf-8"))
+    assert meta["raw_index"] == 0 and meta["n"] == 2
+
+
+def test_sink_raw_frames_can_be_turned_off(tmp_path, frame):
+    sink, _ = _sink(tmp_path, max_fps=0, raw_history=0)
+    sink.submit(frame, {"n": 0})
+    assert sink.process_pending() == 1
+    assert not (tmp_path / "raw").exists()
+    assert "raw_index" not in json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+
+
+def test_default_raw_ring_is_60():
+    assert debug_view.DEFAULT_RAW_HISTORY == 60
+
+
+def test_build_info_marks_remembered_slots():
+    info = debug_view.build_debug_info(
+        available=[0],
+        scores=[(0, "knight", 120, 2400), (1, "UNKNOWN", 1900, 2000)],
+        remembered={1: "giant_skeleton"},
+    )
+    hand = {row["slot"]: row for row in info["hand"]}
+    assert hand[1]["card"] == "giant_skeleton" and hand[1]["remembered"] and hand[1]["raw"] == "UNKNOWN"
+    assert not hand[1]["affordable"] and "remembered" not in hand[0]
+    debug_view.render_debug_frame(np.zeros((633, 419, 3), np.uint8), info)  # renders the (mem) label
+
+
 class _AlwaysFull(queue.Queue):
     def put_nowait(self, item):
         raise queue.Full

@@ -301,6 +301,8 @@ FINISH_TOWER_HP = 0.25
 LANE_SWITCH_HP_MARGIN = 0.15
 TOWER_WINDOW_S = 3.0
 _TOWER_HISTORY = 50
+# A weak tower whose bar stays unreadable this long is treated as destroyed (hp 0).
+TOWER_DESTROYED_MISS_S = 4.0
 
 # Push grouping: enemy units within this distance of the lead count as one push.
 _PUSH_RADIUS = 60
@@ -331,6 +333,12 @@ PRESSURE_DEFENSE_RESERVE = 4
 NEAR_LEAK_BY_PHASE = {PHASE_SINGLE: 9, PHASE_DOUBLE: 8, PHASE_OT2: 8, PHASE_OT3: 7}
 BACK_TANK_MIN_BY_PHASE = {PHASE_SINGLE: 9, PHASE_DOUBLE: 7, PHASE_OT2: 7, PHASE_OT3: 7}
 CYCLE_MIN_BY_PHASE = {PHASE_SINGLE: 7, PHASE_DOUBLE: 6, PHASE_OT2: 6, PHASE_OT3: 5}
+# A tank-led win condition (Balloon) in hand behind a back tank (Giant Skeleton): start the
+# tank at 8 rather than waiting for 9, so the win condition is affordable while it walks.
+TANK_LED_BACK_TANK_MIN = 8
+# Once one of our princess towers is below this, every new push keeps LOW_TOWER_RESERVE back.
+OWN_TOWER_LOW_HP = 0.5
+LOW_TOWER_RESERVE = 4
 NEAR_LEAK_ELIXIR = NEAR_LEAK_BY_PHASE[PHASE_SINGLE]
 BACK_TANK_MIN_ELIXIR = BACK_TANK_MIN_BY_PHASE[PHASE_SINGLE]
 CYCLE_MIN_ELIXIR = CYCLE_MIN_BY_PHASE[PHASE_SINGLE]
@@ -973,6 +981,8 @@ class BattleBrain:
         self._own_hp: dict[str, collections.deque[tuple[float, float]]] = {
             lane: collections.deque(maxlen=_TOWER_HISTORY) for lane in ("left", "right")
         }
+        # (side, lane) -> time the bar first went unreadable, while it was weak.
+        self._tower_miss_since: dict[tuple[str, str], float] = {}
         self._threat_memory: dict[str, tuple[float, EnemyUnit]] = {}
         self._first_count: dict[str, int] = {}
         self._pushes: dict[str, EnemyPush] = {}
@@ -983,6 +993,8 @@ class BattleBrain:
         self.deck = DeckTracker(self.hero_card)
         # Tank-led win condition in hand but not affordable yet (from the full hand).
         self._waiting_win: str | None = None
+        # The whole hand with UNKNOWN slots named by the deck tracker (all 4 slots when known).
+        self._named_hand: dict[int, str] = {}
         # Lumberloon-style pair: (win card, lane, drop spot, until) after the leader went down.
         self._pending_win: tuple[str, str, tuple[int, int], float] | None = None
         self._tank_led_until = 0.0
@@ -1057,7 +1069,9 @@ class BattleBrain:
     def observe_towers(self, health: TowerHealth | None) -> None:
         """Feed one tower-HP read; a median over the last few seconds smooths troops covering the bars.
 
-        Missing or None values (unreadable bar) are skipped, not counted as a dead tower.
+        Missing or None values (unreadable bar) are skipped, not counted as a dead tower — unless
+        the tower was already weak and its bar stays missing for TOWER_DESTROYED_MISS_S, which
+        is what a destroyed tower looks like (then it reads 0).
         """
         if health is None:
             return
@@ -1068,8 +1082,19 @@ class BattleBrain:
                 continue
             for lane in ("left", "right"):
                 value = values.get(lane)
+                key = (side, lane)
                 if value is not None:
+                    self._tower_miss_since.pop(key, None)
                     store[lane].append((now, float(value)))
+                    continue
+                last = self._median(store[lane])
+                if last is None or last <= 0 or last > WEAK_TOWER_HP:
+                    continue
+                since = self._tower_miss_since.setdefault(key, now)
+                if now - since >= TOWER_DESTROYED_MISS_S:
+                    store[lane].clear()
+                    store[lane].append((now, 0.0))
+                    self._tower_miss_since.pop(key, None)
 
     @staticmethod
     def _median(reads: collections.deque[tuple[float, float]]) -> float | None:
@@ -1103,10 +1128,22 @@ class BattleBrain:
         return self.attack_lane
 
     def reserve(self) -> int:
-        """Elixir to keep for defense after an offensive play."""
+        """Elixir to keep for defense after an offensive play (at least 4 once a tower of ours is low)."""
         if self.opponent.deck.win_condition_out_of_cycle():
-            return PUNISH_DEFENSE_RESERVE
-        return PRESSURE_DEFENSE_RESERVE if self.opponent.style() == ARCHETYPE_PRESSURE else DEFENSE_RESERVE
+            base = PUNISH_DEFENSE_RESERVE
+        else:
+            base = PRESSURE_DEFENSE_RESERVE if self.opponent.style() == ARCHETYPE_PRESSURE else DEFENSE_RESERVE
+        return max(base, LOW_TOWER_RESERVE) if self._own_tower_low() else base
+
+    def _own_tower_low(self) -> bool:
+        """One of our princess towers is below OWN_TOWER_LOW_HP (or destroyed)."""
+        return any((hp := self.own_tower_hp(lane)) is not None and hp < OWN_TOWER_LOW_HP for lane in ("left", "right"))
+
+    def _push_reserve_ok(self, cost: int, elixir: int | None, elixir_full: bool = False) -> bool:
+        """Starting a push with a low tower of ours: keep LOW_TOWER_RESERVE back for defense."""
+        if elixir is None or elixir_full or not self._own_tower_low():
+            return True
+        return elixir - cost >= LOW_TOWER_RESERVE
 
     # ---- defense sizing, locks, memory -----------------------------------------
 
@@ -1224,6 +1261,7 @@ class BattleBrain:
         }  # an UNKNOWN that might be the hero (2+ candidates) is never played blind
         hand = {i: named.get(i, c) if c == UNKNOWN_CARD else c for i, c in hand.items()}
         self._waiting_win = next((c for i, c in named.items() if i not in hand and is_tank_led_win(c)), None)
+        self._named_hand = dict(named)
         pushes = self._summarize(threats, friends, track=True)
         self._pushes = pushes
         self.opponent.observe(pushes, threats)
@@ -1467,7 +1505,11 @@ class BattleBrain:
         if not elixir_full and elixir < PAIR_MIN_BY_PHASE[self._phase]:
             return None
         wins = [c for c in cards if is_tank_led_win(c[1])]
-        leaders = [c for c in cards if _known(c[1]) and _is(c[1], PAIR_LEADERS)]
+        leaders = [
+            c
+            for c in cards
+            if _known(c[1]) and _is(c[1], PAIR_LEADERS) and self._push_reserve_ok(card_cost(c[1]), elixir, elixir_full)
+        ]
         if not wins or not leaders:
             return None
         lane = self._win_lane(lane)
@@ -1652,6 +1694,8 @@ class BattleBrain:
         if card[2] in (ROLE_SPELL, ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL):
             return True  # gated by their own rules (finishing / spawner / leak)
         cost = card_cost(card[1])
+        if mode in ("normal", "pressure") and not self._push_reserve_ok(cost, elixir):
+            return False  # a low tower of ours: new pushes keep LOW_TOWER_RESERVE back
         if self._role(card[1]) == ROLE_WIN:
             return (mode == "counter" and elixir - cost >= 1) or elixir - cost >= self.reserve()
         if mode == "follow":
@@ -1667,7 +1711,12 @@ class BattleBrain:
         if self.opponent.style() == ARCHETYPE_PRESSURE and not elixir_full:
             return None  # a slow push at the back gets punished by bridge spam in the other lane
         threshold = BACK_TANK_MIN_BY_PHASE[self._phase]
+        if any(is_tank_led_win(c) for c in self._named_hand.values()):
+            threshold = min(threshold, TANK_LED_BACK_TANK_MIN)  # the Balloon follows the tank
         if not elixir_full and elixir < max(threshold, *(card_cost(c[1]) for c in tanks)):
+            return None
+        tanks = [c for c in tanks if self._push_reserve_ok(card_cost(c[1]), elixir, elixir_full)]
+        if not tanks:
             return None
         index, card_id, _ = self._pick(tanks)
         return Play(
@@ -1688,7 +1737,7 @@ class BattleBrain:
             return None
         if any((self._role(c[1]) == ROLE_WIN and not is_tank_led_win(c[1])) or self._is_back_tank(c[1]) for c in cards):
             return None  # a held tank-led win condition (waiting for its tank) doesn't block value
-        spawners = [c for c in cards if _is(c[1], SPAWNER_BUILDINGS)]
+        spawners = [c for c in cards if _is(c[1], SPAWNER_BUILDINGS) and self._push_reserve_ok(card_cost(c[1]), elixir)]
         if not spawners:
             return None
         index, card_id, picked = self._pick(spawners)
@@ -1707,7 +1756,10 @@ class BattleBrain:
         cheap = [
             c
             for c in cards
-            if _known(c[1]) and c[2] in (ROLE_TROOP, ROLE_SUPPORT) and card_cost(c[1]) <= _CYCLE_MAX_COST
+            if _known(c[1])
+            and c[2] in (ROLE_TROOP, ROLE_SUPPORT)
+            and card_cost(c[1]) <= _CYCLE_MAX_COST
+            and self._push_reserve_ok(card_cost(c[1]), elixir)
         ]
         if not cheap:
             return None

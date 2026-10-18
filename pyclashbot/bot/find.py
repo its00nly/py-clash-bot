@@ -12,11 +12,13 @@ import cv2
 import numpy as np
 
 from pyclashbot.bot.coords import (
+    ENEMY_TOWER_HP_BAR_Y_BAND,
     ENEMY_TOWER_HP_BARS,
     ENEMY_UNIT_CROP_OFFSETS_LTRB,
     ENEMY_UNIT_SCAN_REGION_LTRB,
     FRIENDLY_UNIT_SCAN_REGION_LTRB,
     LANE_SPLIT_X,
+    OWN_TOWER_HP_BAR_Y_BAND,
     OWN_TOWER_HP_BARS,
     UPGRADE_POINTS,
 )
@@ -189,38 +191,76 @@ def crop_unit(iar: np.ndarray | None, unit: EnemyUnit) -> np.ndarray | None:
     return padded[y + dt : y + db, x + dl : x + dr].copy()
 
 
-# HP-bar fill colors (BGR) for princess towers: enemy pink-red, ours light blue.
-_ENEMY_TOWER_FILL_BGR = np.array([94, 38, 226])
-_OWN_TOWER_FILL_BGR = np.array([255, 210, 114])
+# HP-bar fill colors (BGR) for princess towers: enemy pink-red, ours light blue (top rows)
+# and a darker blue (lower rows). Measured on the battle fixture and the yellow arena.
+_ENEMY_TOWER_FILLS_BGR = (np.array([94, 38, 226]),)
+_OWN_TOWER_FILLS_BGR = (np.array([255, 210, 114]), np.array([231, 158, 0]))
 _TOWER_FILL_TOLERANCE = 40
+# A bar drains from the right, so a live bar always has fill in its first few pixels.
+_TOWER_BAR_ANCHOR_PX = 4
+# Gaps this wide inside the fill (anti-aliasing, a stray pixel) don't end the run.
+_TOWER_BAR_MAX_GAP = 2
+# A bar row needs this many fill pixels, on this many consecutive rows (the bar is ~3 rows thick).
+_TOWER_BAR_MIN_PX = 2
+_TOWER_BAR_MIN_ROWS = 2
+# Rows read from the bar's top: the HP number overlaps the lower rows.
+_TOWER_BAR_READ_ROWS = 3
 
 
 @dataclass(frozen=True)
 class TowerHealth:
-    """Princess-tower HP as a 0..1 fraction per lane (0 also means destroyed/unreadable)."""
+    """Princess-tower HP as a 0..1 fraction per lane; None = no bar found (covered or destroyed)."""
 
-    enemy: dict[str, float]
-    own: dict[str, float]
+    enemy: dict[str, float | None]
+    own: dict[str, float | None]
 
 
-def _bar_fraction(iar: np.ndarray, bar: tuple[int, int, int], fill: np.ndarray) -> float:
-    x_left, x_right, y = bar
-    # Sample the bar's row and the one above it; take the better read (troops can cover one).
-    best = 0.0
-    for row in (y, y - 1):
-        pixels = iar[row, x_left : x_right + 1].astype(int)
-        filled = np.all(np.abs(pixels - fill) <= _TOWER_FILL_TOLERANCE, axis=-1)
-        best = max(best, float(filled.mean()) if filled.size else 0.0)
-    return best
+def _fill_run(row: np.ndarray, fills: tuple[np.ndarray, ...]) -> int:
+    """Length of the fill run from the bar's left end (0 if the left end isn't fill)."""
+    pixels = row.astype(int)
+    mask = np.zeros(len(pixels), dtype=bool)
+    for fill in fills:
+        mask |= np.all(np.abs(pixels - fill) <= _TOWER_FILL_TOLERANCE, axis=-1)
+    if not mask[:_TOWER_BAR_ANCHOR_PX].any():
+        return 0
+    end, gap = 0, 0
+    for i, filled in enumerate(mask):
+        if filled:
+            end, gap = i + 1, 0
+        else:
+            gap += 1
+            if gap > _TOWER_BAR_MAX_GAP:
+                break
+    return end
+
+
+def _bar_fraction(
+    iar: np.ndarray, span: tuple[int, int], band: tuple[int, int], fills: tuple[np.ndarray, ...]
+) -> float | None:
+    """Find the bar's row inside the y-band by color, then measure its fill; None if no bar."""
+    x_left, x_right = span
+    top, bottom = max(0, band[0]), min(iar.shape[0], band[1])
+    width = x_right - x_left + 1
+    runs = [_fill_run(iar[y, x_left : x_right + 1], fills) for y in range(top, bottom)]
+    for i in range(len(runs) - _TOWER_BAR_MIN_ROWS + 1):
+        if all(run >= _TOWER_BAR_MIN_PX for run in runs[i : i + _TOWER_BAR_MIN_ROWS]):
+            return min(1.0, max(runs[i : i + _TOWER_BAR_READ_ROWS]) / width)
+    return None
 
 
 def read_tower_health(iar: np.ndarray | None) -> TowerHealth | None:
-    """Read princess-tower HP bars from a BGR battle frame."""
+    """Read princess-tower HP bars from a BGR battle frame (searches each side's y-band)."""
     if iar is None:
         return None
     return TowerHealth(
-        enemy={lane: _bar_fraction(iar, bar, _ENEMY_TOWER_FILL_BGR) for lane, bar in ENEMY_TOWER_HP_BARS.items()},
-        own={lane: _bar_fraction(iar, bar, _OWN_TOWER_FILL_BGR) for lane, bar in OWN_TOWER_HP_BARS.items()},
+        enemy={
+            lane: _bar_fraction(iar, (x_left, x_right), ENEMY_TOWER_HP_BAR_Y_BAND, _ENEMY_TOWER_FILLS_BGR)
+            for lane, (x_left, x_right, _y) in ENEMY_TOWER_HP_BARS.items()
+        },
+        own={
+            lane: _bar_fraction(iar, (x_left, x_right), OWN_TOWER_HP_BAR_Y_BAND, _OWN_TOWER_FILLS_BGR)
+            for lane, (x_left, x_right, _y) in OWN_TOWER_HP_BARS.items()
+        },
     )
 
 

@@ -10,7 +10,9 @@ fight loop: ``submit`` copies the frame into a size-1 queue (an older pending fr
 and a daemon thread renders, JPEG-encodes and writes ``<app data>/debug/latest.jpg`` +
 ``latest.json`` atomically (temp file + ``os.replace``), throttled to ``max_fps``. The last
 ``history`` frames are also kept as ``debug/history/NNN.jpg`` (+ ``NNN.json``), overwritten
-cyclically, so a bad moment can be reviewed after the fact. The GUI's debug window
+cyclically, so a bad moment can be reviewed after the fact. The newest ``raw_history`` frames
+are also saved unannotated (native size, lossless) as ``debug/raw/NNN.png`` for offline card
+fingerprinting and calibration; ``NNN.json`` names its ``raw_index``. The GUI's debug window
 (``interface/debug_window.py``) polls ``latest.jpg`` / ``latest.json``.
 
 ``info`` is plain JSON (see :func:`build_debug_info`), so the same dict is written to disk.
@@ -48,10 +50,14 @@ _log = logging.getLogger(__name__)
 SCALE = 2
 DEFAULT_MAX_FPS = 5.0
 DEFAULT_HISTORY = 200
+DEFAULT_RAW_HISTORY = 60
+# Fast PNG compression: the raw ring is written on the background thread at ~5 fps.
+RAW_PNG_COMPRESSION = 1
 JPEG_QUALITY = 80
 LATEST_JPG = "latest.jpg"
 LATEST_JSON = "latest.json"
 HISTORY_DIR = "history"
+RAW_DIR = "raw"
 
 # Overrides the debug folder (None = <app data dir>/debug); tests point it at a tmp dir.
 DEBUG_DIR: str | None = None
@@ -119,6 +125,7 @@ def build_debug_info(
     phase: str | None = None,
     elapsed: float | None = None,
     in_battle: bool = True,
+    remembered: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """Flatten one tick's values (already computed by the fight loop) into JSON for render + disk."""
     available = [int(s) for s in available]
@@ -127,6 +134,12 @@ def build_debug_info(
         hand_rows[int(slot)] = {"slot": int(slot), "card": str(card), "best": int(best), "second": int(second)}
     for slot, card in (hand or {}).items():
         hand_rows.setdefault(int(slot), {"slot": int(slot), "card": str(card), "best": None, "second": None})
+    for slot, card in (remembered or {}).items():
+        # The slot read UNKNOWN (e.g. greyed): the fight loop remembers which card is there.
+        row = hand_rows.setdefault(int(slot), {"slot": int(slot), "card": "UNKNOWN", "best": None, "second": None})
+        row["raw"] = row["card"]
+        row["card"] = str(card)
+        row["remembered"] = True
     for row in hand_rows.values():
         row["affordable"] = row["slot"] in available
 
@@ -264,7 +277,8 @@ def _draw_hand(img: np.ndarray, info: Mapping[str, Any]) -> None:
         else:
             color = _GREY
         _rect(img, (x, y, x + w, y + h), color, 3)
-        _text(img, _fit(card, _s(w) + 10, _SMALL_SCALE), _pt(x, y - 3), color, _SMALL_SCALE)
+        label = f"{card} (mem)" if row.get("remembered") else card
+        _text(img, _fit(label, _s(w) + 10, _SMALL_SCALE), _pt(x, y - 3), color, _SMALL_SCALE)
         if row.get("best") is not None:
             _text(img, f"{row['best']}/{row['second']}", _pt(x + 2, y + h - 3), color, _SMALL_SCALE)
 
@@ -388,6 +402,7 @@ class DebugFrameSink:
         *,
         max_fps: float = DEFAULT_MAX_FPS,
         history: int = DEFAULT_HISTORY,
+        raw_history: int = DEFAULT_RAW_HISTORY,
         clock: Callable[[], float] = time.monotonic,
         frame_queue: queue.Queue | None = None,
         start_thread: bool = True,
@@ -395,6 +410,7 @@ class DebugFrameSink:
         self.root = root or default_debug_dir()
         self.min_interval = 1.0 / max_fps if max_fps > 0 else 0.0
         self.history = max(1, int(history))
+        self.raw_history = max(0, int(raw_history))  # 0 = no raw frames
         self.clock = clock
         self.queue: queue.Queue = frame_queue if frame_queue is not None else queue.Queue(maxsize=1)
         self.last_submit = -1e9
@@ -470,9 +486,17 @@ class DebugFrameSink:
             jpg = buf.tobytes()
             index = self.seq % self.history
             meta = dict(info, seq=self.seq, history_index=index)
-            text = json.dumps(meta, default=str).encode("utf-8")
             history_dir = os.path.join(self.root, HISTORY_DIR)
             os.makedirs(history_dir, exist_ok=True)
+            if self.raw_history:
+                raw_index = self.seq % self.raw_history
+                ok, png = cv2.imencode(".png", iar, [int(cv2.IMWRITE_PNG_COMPRESSION), RAW_PNG_COMPRESSION])
+                if ok:
+                    raw_dir = os.path.join(self.root, RAW_DIR)
+                    os.makedirs(raw_dir, exist_ok=True)
+                    _write_atomic(os.path.join(raw_dir, f"{raw_index:03d}.png"), png.tobytes())
+                    meta["raw_index"] = raw_index
+            text = json.dumps(meta, default=str).encode("utf-8")
             _write_atomic(os.path.join(history_dir, f"{index:03d}.jpg"), jpg)
             _write_atomic(os.path.join(history_dir, f"{index:03d}.json"), text)
             _write_atomic(os.path.join(self.root, LATEST_JPG), jpg)

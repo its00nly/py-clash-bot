@@ -551,3 +551,146 @@ def test_debug_view_only_for_smart_battles(env, monkeypatch, smart, expected):
     with pytest.raises(_StopLoopError):
         fight._fight_loop(None, logger, False, "Classic 1v1", None, smart_battle=smart, debug_view=True)
     assert seen == [expected]
+
+
+# ---- hand slot memory ---------------------------------------------------------
+
+
+class _FullHandBrain(_Brain):
+    """A brain that takes the full 4-slot hand and the affordable set."""
+
+    def choose(
+        self, hand, threats, elapsed_s, elixir_full=False, elixir=None, friends=(), clock=None,
+        full_hand=None, affordable=None,
+    ):  # fmt: skip
+        self.choose_calls.append({"hand": dict(hand), "full_hand": dict(full_hand or {}), "affordable": affordable})
+
+
+def test_remembered_card_fills_a_greyed_slot_but_stays_unaffordable(env, monkeypatch):
+    clock, _, log_dir = env
+    # Shot 0: slot 0 reads giant_skeleton (affordable). Later: it greys out (unaffordable) and reads UNKNOWN.
+    emulator = _Emulator(clock, lambda n: _Spec(in_battle=n < 4, slots=(0, 1, 2, 3) if n == 0 else (1, 2, 3)))
+
+    def scored(iar=None, slots=(0, 1, 2, 3)):
+        first = emulator.shots <= 1
+        return [(s, ("giant_skeleton" if first else "UNKNOWN") if s == 0 else HAND[s], 0, 9999) for s in slots]
+
+    monkeypatch.setattr(fight.card_detection, "identify_hand_cards_scored", scored, raising=False)
+    brain = _FullHandBrain(emulator)
+
+    _run_smart(monkeypatch, emulator, brain)
+    later = brain.choose_calls[-1]
+    assert later["full_hand"][0] == "giant_skeleton"  # remembered
+    assert 0 not in later["hand"] and 0 not in later["affordable"]  # affordability unchanged
+    lines = [json.loads(line) for f in log_dir.glob("*.jsonl") for line in f.read_text().splitlines()]
+    slot0 = [line["hand"]["0"] for line in lines if "hand" in line]
+    assert {"card": "giant_skeleton", "affordable": False, "remembered": True} in slot0
+    assert slot0[0] == {"card": "giant_skeleton", "affordable": True}  # a live read isn't flagged
+
+
+def test_verified_deploy_clears_the_slot_memory(env, monkeypatch):
+    clock, _, _ = env
+    brain = _Brain(_Emulator(clock, lambda n: _Spec()))
+    ctx = fight.FightContext(brain)
+    ctx.remember_hand({0: "giant_skeleton", 1: "arrows"}, None)
+    assert ctx.slot_memory == {0: "giant_skeleton", 1: "arrows"}
+    frame = _frame(_Spec())
+    play = Play(0, "giant_skeleton", "troop", DROP, "left", False, "test play")
+    ctx.pending = fight.PendingPlay(play, 0, "giant_skeleton", 8, fight._slot_fingerprint(frame, 0), clock.now)
+
+    ctx._verify(_Logger(), fight.TickFrame(frame, clock.now + 1, True, 2, [0, 1, 2, 3]))
+    assert brain.records == [(play, True)]
+    assert ctx.slot_memory == {1: "arrows"}
+    hand, _full, remembered = ctx.remember_hand({0: "UNKNOWN", 1: "UNKNOWN"}, None)
+    assert hand == {0: "UNKNOWN", 1: "arrows"} and remembered == {1: "arrows"}
+
+
+def test_stale_read_of_the_card_just_played_is_not_remembered(env):
+    clock, _, _ = env
+    ctx = fight.FightContext(_Brain(_Emulator(clock, lambda n: _Spec())))
+    ctx.slot_last_deployed[0] = "giant_skeleton"
+    ctx.remember_hand({0: "giant_skeleton"}, None)  # the frame still shows the played card
+    assert 0 not in ctx.slot_memory
+    ctx.remember_hand({0: "evo_lumberjack"}, None)  # the new card from 'Next'
+    assert ctx.slot_memory == {0: "evo_lumberjack"}
+
+
+# ---- learned card art -----------------------------------------------------------
+
+LEARN_DECK = ["balloon", "arrows", "furnace", "giant_skeleton", "ice_spirit", "lumberjack", "skeletons", "snowball"]
+
+
+class _DeckBrain(_Brain):
+    def __init__(self, emulator):
+        super().__init__(emulator)
+        from pyclashbot.bot.battle_brain import DeckTracker
+
+        self.deck = DeckTracker("hero_balloon")
+        for card in LEARN_DECK[1:]:
+            self.deck.observe_hand([card])
+
+
+def _art(seed: int, nudge: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    hists = np.stack([np.bincount(rng.integers(0, 16, 891), minlength=16) for _ in range(4)]).astype(np.int32)
+    hists[:, 0] += nudge
+    hists[:, 1] -= min(nudge, int(hists[:, 1].min()))
+    return hists
+
+
+def _learning_play(ctx, clock, card, elixir_before, art, **extra):
+    frame = _frame(_Spec())
+    play = Play(0, card, "troop", DROP, "left", False, "test play")
+    ctx.pending = fight.PendingPlay(
+        play, 0, card, elixir_before, fight._slot_fingerprint(frame, 0), clock.now, "UNKNOWN",
+        hist_before=art, chroma_before=80.0, **extra,
+    )  # fmt: skip
+    return frame
+
+
+def test_exact_elixir_drop_learns_the_hero_card_once(env):
+    clock, _, _ = env
+    brain = _DeckBrain(_Emulator(clock, lambda n: _Spec()))
+    assert sorted(brain.deck.deck) == sorted(LEARN_DECK)
+    ctx = fight.FightContext(brain)
+    logger = _Logger()
+    pool = frozenset(LEARN_DECK) - {"arrows", "snowball", "ice_spirit"}  # the other three slots
+    for nudge in (0, 20, 40):
+        frame = _learning_play(ctx, clock, "hero_balloon", 7, _art(1, nudge), learn_pool=pool)
+        ctx._verify(logger, fight.TickFrame(frame, clock.now + 1, True, 2, [0, 1, 2, 3]))  # dropped exactly 5
+    assert fight.card_detection.learned_store().is_active("hero_balloon")
+    assert logger.logs.count("Learned card art for hero_balloon") == 1
+
+
+def test_ambiguous_elixir_drop_learns_nothing(env):
+    clock, _, _ = env
+    ctx = fight.FightContext(_DeckBrain(_Emulator(clock, lambda n: _Spec())))
+    pool = frozenset(LEARN_DECK) - {"arrows", "snowball", "ice_spirit"}  # furnace and lumberjack both cost 4
+    for nudge in (0, 20):
+        frame = _learning_play(ctx, clock, "evo_furnace", 6, _art(2, nudge), learn_pool=pool)
+        ctx._verify(_Logger(), fight.TickFrame(frame, clock.now + 1, True, 2, [0, 1, 2, 3]))
+    assert fight.card_detection.learned_store().samples == {}
+
+
+def test_rotation_resolve_learns_without_an_elixir_match(env):
+    clock, _, _ = env
+    ctx = fight.FightContext(_DeckBrain(_Emulator(clock, lambda n: _Spec())))
+    logger = _Logger()
+    for nudge in (0, 20):
+        frame = _learning_play(ctx, clock, "evo_lumberjack", 6, _art(3, nudge), rotation_label="lumberjack")
+        ctx._verify(logger, fight.TickFrame(frame, clock.now + 1, True, 3, [0, 1, 2, 3]))  # drop 3, not 4
+    assert fight.card_detection.learned_store().is_active("evo_lumberjack")
+    assert "Learned card art for evo_lumberjack" in logger.logs
+
+
+def test_learning_context_skips_greyed_and_known_slots(env):
+    clock, _, _ = env
+    ctx = fight.FightContext(_DeckBrain(_Emulator(clock, lambda n: _Spec())))
+    grey = np.full((633, 419, 3), 128, dtype=np.uint8)
+    assert ctx.learning_context(grey, 0, "UNKNOWN", "hero_balloon", {0: "UNKNOWN"}) == {}
+    colour = np.zeros((633, 419, 3), dtype=np.uint8)
+    colour[..., 2] = 220  # saturated red everywhere
+    assert ctx.learning_context(colour, 0, "arrows", "arrows", {0: "arrows"}) == {}  # read fine: nothing to learn
+    context = ctx.learning_context(colour, 0, "UNKNOWN", "hero_balloon", {0: "UNKNOWN", 1: "arrows"})
+    assert context["hist_before"].shape == (4, 16) and context["chroma_before"] >= 20
+    assert context["learn_pool"] == frozenset(LEARN_DECK) - {"arrows"}

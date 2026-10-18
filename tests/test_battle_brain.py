@@ -280,7 +280,7 @@ def test_reads_full_towers_on_the_fixture(frame):
 
     health = read_tower_health(frame)
     assert health is not None
-    assert all(v > 0.9 for v in (*health.enemy.values(), *health.own.values()))
+    assert all(v is not None and v > 0.9 for v in (*health.enemy.values(), *health.own.values()))
 
 
 def test_reads_a_damaged_tower(frame):
@@ -289,8 +289,71 @@ def test_reads_a_damaged_tower(frame):
     frame[90:100, 122:142] = (35, 0, 117)  # darken the right half of the enemy left bar
     health = read_tower_health(frame)
     assert health is not None
-    assert 0.4 < health.enemy["left"] < 0.6
-    assert health.enemy["right"] > 0.9
+    left, right = health.enemy["left"], health.enemy["right"]
+    assert left is not None and 0.4 < left < 0.6
+    assert right is not None and right > 0.9
+
+
+YELLOW_ARENA = Path(__file__).parent / "fixtures" / "arena_yellow_downscaled.png"
+YELLOW_ARENA_DAMAGED = Path(__file__).parent / "fixtures" / "arena_yellow_damaged_downscaled.png"
+
+
+def test_reads_enemy_towers_on_the_yellow_arena():
+    """Regression: the enemy bars sit at y~85 in this arena (not the fixture's ~96) and read 0.0."""
+    from pyclashbot.bot.find import read_tower_health
+
+    health = read_tower_health(cv2.imread(str(YELLOW_ARENA)))
+    assert health is not None
+    assert health.enemy["left"] is not None and health.enemy["left"] > 0.95
+    assert health.enemy["right"] is not None and health.enemy["right"] > 0.95
+    assert health.own == {"left": 1.0, "right": 1.0}
+
+
+def test_reads_a_damaged_own_tower_on_the_yellow_arena():
+    from pyclashbot.bot.find import read_tower_health
+
+    health = read_tower_health(cv2.imread(str(YELLOW_ARENA_DAMAGED)))
+    assert health is not None
+    assert health.own["right"] is not None and 0.18 < health.own["right"] < 0.3
+    assert health.own["left"] is not None and 0.85 < health.own["left"] < 0.97
+    assert health.enemy["left"] is not None and health.enemy["left"] > 0.95
+
+
+def test_missing_tower_bar_reads_none_not_zero(frame):
+    from pyclashbot.bot.find import read_tower_health
+
+    frame[70:110, 95:150] = (70, 190, 190)  # paint grass over the enemy left bar
+    health = read_tower_health(frame)
+    assert health is not None
+    assert health.enemy["left"] is None
+    assert health.enemy["right"] is not None and health.enemy["right"] > 0.9
+
+
+def test_weak_tower_with_a_lasting_missing_bar_counts_as_destroyed():
+    from pyclashbot.bot.find import TowerHealth
+
+    clock = [100.0]
+    brain = BattleBrain(clock=lambda: clock[0])
+    brain.observe_towers(_health(enemy_left=0.2))
+    for _ in range(3):  # briefly covered: still the last read
+        clock[0] += 1.0
+        brain.observe_towers(TowerHealth(enemy={"left": None, "right": 1.0}, own={"left": 1.0, "right": 1.0}))
+    assert brain.enemy_tower_hp("left") == 0.2
+    clock[0] += 2.0  # 4 s since the bar first went missing
+    brain.observe_towers(TowerHealth(enemy={"left": None, "right": 1.0}, own={"left": 1.0, "right": 1.0}))
+    assert brain.enemy_tower_hp("left") == 0.0
+
+
+def test_healthy_tower_with_a_missing_bar_is_never_destroyed():
+    from pyclashbot.bot.find import TowerHealth
+
+    clock = [100.0]
+    brain = BattleBrain(clock=lambda: clock[0])
+    brain.observe_towers(_health(enemy_left=0.9))
+    for _ in range(10):
+        clock[0] += 1.0
+        brain.observe_towers(TowerHealth(enemy={"left": None, "right": 1.0}, own={"left": 1.0, "right": 1.0}))
+    assert brain.enemy_tower_hp("left") == 0.9
 
 
 def test_attacks_the_weaker_enemy_tower():

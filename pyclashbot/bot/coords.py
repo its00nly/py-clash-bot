@@ -189,8 +189,14 @@ OWN_TOWER_FOOTPRINTS_LTRB = (
     (172, 395, 246, 462),  # king tower
 )
 # Princess-tower HP bars: (x_left, x_right, y) per lane, measured on the battle fixture.
+# The y is only the nominal row (overlays, friendly-unit filter): the bar's row moves between
+# arenas (enemy ~96 on the battle fixture, ~85 on the yellow arena), so read_tower_health
+# searches the y-band below for it.
 ENEMY_TOWER_HP_BARS = {"left": (103, 141, 96), "right": (289, 327, 96)}
 OWN_TOWER_HP_BARS = {"left": (103, 141, 393), "right": (290, 327, 393)}
+# Rows (top, bottom exclusive) searched for each side's princess-tower HP bar.
+ENEMY_TOWER_HP_BAR_Y_BAND = (70, 110)
+OWN_TOWER_HP_BAR_Y_BAND = (380, 410)
 # Back-of-lane drop spots for a calm opening play (behind our princess towers).
 OPENING_BACK_COORDS = {"left": (115, 450), "right": (303, 450)}
 # Our troops are tracked across the whole arena (they fight on both halves).

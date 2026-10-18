@@ -466,7 +466,7 @@ def test_overtime_defends_the_lowest_tower_first():
 def test_none_tower_reads_are_skipped():
     brain = _brain()
     brain.observe_towers(None)
-    brain.observe_towers(TowerHealth(enemy={"left": None, "right": 0.5}, own={}))  # ty: ignore[invalid-argument-type]
+    brain.observe_towers(TowerHealth(enemy={"left": None, "right": 0.5}, own={}))
     assert brain.enemy_tower_hp("left") is None
     assert brain.enemy_tower_hp("right") == 0.5
     assert brain.own_tower_hp("left") is None
