@@ -3,27 +3,28 @@
 The default fight loop waits for a random elixir amount and plays a random card.
 This module plays more like a person:
 
-* **Defend pushes cheaply.** Enemy troops crossing onto our half (``find_enemy_units``)
-  are grouped into a push per lane. Swarms get a small spell the moment they cross,
-  a lone troop gets the cheapest card that handles it, and a push our troops are
-  already fighting is left alone (no Arrows on Minions our Phoenix is shooting).
-* **Stuns on purpose.** Zap / Electro Spirit / E-Wiz / E-Dragon / Freeze are kept to
-  reset a lone heavy hitter that reaches our tower.
-* **Safer placement.** Defenders go where they pull the enemy into tower range,
-  ranged support sits off to the side, and swarm cards aren't thrown into multi-unit
-  pushes (splash like Bowler/Valkyrie/Wizard eats them).
-* **Elixir discipline.** Knows card costs and the current elixir: keeps a defense
-  reserve, never dumps troops at the bridge just because, cycles cheap cards to
-  bring the win condition back, and never leaks at 10.
-* **Real pushes.** Heavy tanks (Golem, Giant, Lava Hound...) start at the back when
-  elixir is high and get support behind them; counter-pushes follow a good defense.
-* **Memory.** Tracks our own deck and rotation and the opponent's push pattern
-  (bridge spam / beatdown / balanced) and adapts reserve and aggression to it.
-* **Knows what it's fighting** (once ``unit_classifier`` has a trained model): air
-  pushes get anti-air defenders, splash troops never get swarm cards thrown at them,
-  tanks get high-DPS answers, and ``OpponentDeck`` remembers the opponent's cards and
-  rough cycle to name their deck (Lumberloon, Hog cycle, Golem...) and punish the
-  window right after their win condition was played.
+* **Defend pushes cheaply, and only as hard as needed.** Enemy troops crossing onto our
+  half (``find_enemy_units``) are grouped into a push per lane. A real swarm (4+ markers,
+  or a recognized Minion Horde / Skarmy...) gets an area spell, a lone troop gets the
+  cheapest known card that handles it, and a push our troops already fight is left
+  alone. ``defense_budget`` sizes the answer: short on elixir far from the tower we
+  wait instead of throwing in a card that can't win the fight.
+* **Spells are precious.** Arrows/Snowball are kept for swarms; tower damage only when
+  the spell actually finishes the tower (``SPELL_TOWER_FRACTION``), plus a tiebreak chip
+  in the last seconds of overtime. The last swarm answer in the cycle is never thrown.
+* **Stuns on purpose.** Zap / Electro Spirit / E-Wiz / E-Dragon reset a lone heavy hitter
+  that reaches our tower.
+* **Per-card placement** (``card_knowledge.CardInfo.def_place``): cycle cards land on the
+  threat, tanks in front of it, buildings in the centre pull spot.
+* **Elixir discipline by match phase.** Leak / back-tank / cycle thresholds drop in
+  double elixir and overtime (``MatchClock`` / ``match_phase``).
+* **Real pushes.** Tanks (Golem, Giant, Giant Skeleton when it is the deck's only win
+  condition...) start at the back; follow-ups wait until the tank reaches the bridge and
+  then drop behind it. Counter-pushes only happen while a troop of ours survived the
+  defense, with a spend cap.
+* **Memory.** Tracks our own deck and rotation (resolving an unreadable slot from the
+  rotation), infers the win condition, remembers threats for a couple of seconds when a
+  frame misses them, and models the opponent's push pattern and cards.
 
 Pure decision logic over (hand, units, elixir, time) so it is unit-testable offline;
 ``fight.py`` owns the screenshots and clicks.
@@ -32,16 +33,20 @@ Pure decision logic over (hand, units, elixir, time) so it is unit-testable offl
 from __future__ import annotations
 
 import collections
+import logging
 import random
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from pyclashbot.bot import card_knowledge as ck
 from pyclashbot.bot.card_detection import calculate_play_coords, get_card_group
 from pyclashbot.bot.coords import (
     BACK_TANK_COORDS,
     DEFENSE_BUILDING_PULL_COORDS,
+    ENEMY_PRINCESS_TOWER_CENTERS,
+    LANE_BRIDGE_X,
     LANE_SPLIT_X,
     OPENING_BACK_COORDS,
     OWN_HALF_DROP_Y_RANGE,
@@ -52,9 +57,11 @@ from pyclashbot.bot.find import EnemyUnit
 from pyclashbot.bot.unit_classifier import CATEGORY_TRAITS, UnitTraits
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from pyclashbot.bot.find import TowerHealth
+
+_log = logging.getLogger(__name__)
 
 ROLE_WIN = "win"
 ROLE_TROOP = "troop"
@@ -91,7 +98,7 @@ WIN_CONDITIONS = frozenset(
         "xbow",
     }
 )
-# Damage/control spells: cast on an enemy push, or at a tower to chip.
+# Damage/control spells: cast on an enemy push, or at a tower to finish it.
 DAMAGE_SPELLS = frozenset(
     {
         "arrows",
@@ -173,7 +180,7 @@ SMALL_SPELLS = frozenset(
 # Rolling spells travel up the lane from where they land: drop them just on our side of the target.
 _ROLLING_SPELLS = frozenset({"log", "barb_barrel"})
 # Stun / reset: interrupts charges, Inferno beams, Sparky shots, and units diving the tower.
-STUN_CARDS = frozenset({"zap", "electro_spirit", "electro_wizard", "electro_dragon", "freeze", "lightning"})
+STUN_CARDS = frozenset({"zap", "electro_spirit", "electro_wizard", "electro_dragon"})
 # Tanks worth starting a push with from behind our towers.
 BACK_TANKS = frozenset({"golem", "giant", "lava_hound", "electro_giant", "goblin_giant", "elixir_golem", "rune_giant"})
 
@@ -218,65 +225,127 @@ TANK_KILLERS = frozenset(
     }
 )  # fmt: skip
 
+# Melee swarm cards: they fight like troops (on the threat), not like ranged support at the back.
+MELEE_SWARMS = frozenset({"skeletons", "skeleton_army", "goblins"})
+# Buildings that make value on their own: worth placing on an empty board.
+SPAWNER_BUILDINGS = frozenset({"furnace", "goblin_hut"})
+# Spells that only hit ground units, and spells that don't kill anything by themselves.
+GROUND_ONLY_SPELLS = frozenset({"log", "barb_barrel", "earthquake"})
+NO_KILL_SPELLS = frozenset({"tornado"})
+# Area spells big enough for a Minion Horde / Skarmy / Goblin Gang.
+BIG_SWARM_SPELLS = frozenset({"arrows", "fireball", "poison"})
+# Recognized swarms a spell actually kills...
+SPELLABLE_SWARMS = frozenset(
+    {"bats", "goblin_gang", "goblins", "minion_horde", "minions", "skeleton_army", "skeletons", "spear_goblins"}
+)
+# ...of which a single marker already means a big group.
+_ONE_MARKER_SWARMS = frozenset({"goblin_gang", "minion_horde", "skeleton_army"})
+# ...and the cheap ones (1-2 elixir) only worth a spell when there are plenty of them.
+_CHEAP_SWARMS = frozenset({"bats", "goblins", "skeletons", "spear_goblins"})
+# Fraction of a princess tower's HP a spell removes (rough, level-agnostic): finish only below this.
+SPELL_TOWER_FRACTION: dict[str, float] = {
+    "arrows": 0.04, "snowball": 0.04, "zap": 0.04, "log": 0.04, "gob_curse": 0.04, "barb_barrel": 0.03,
+    "fireball": 0.10, "poison": 0.10, "earthquake": 0.08, "void": 0.08, "lightning": 0.12, "rocket": 0.30,
+}  # fmt: skip
+
 _DEFENSE_PRIORITY = (ROLE_TROOP, ROLE_SUPPORT, ROLE_BUILDING, ROLE_SPELL, ROLE_OWN_SIDE_SPELL)
-_OFFENSE_PRIORITY = (ROLE_WIN, ROLE_SUPPORT, ROLE_TROOP)
-# Right after a win condition goes down: back it up instead of stacking another one.
-_FOLLOW_UP_PRIORITY = (ROLE_SUPPORT, ROLE_TROOP, ROLE_WIN)
 # Opening play: something cheap at the back, never a naked win condition at the bridge.
 _OPENING_PRIORITY = (ROLE_SUPPORT, ROLE_TROOP)
-# Only played when elixir is about to leak (spells also when they can finish a tower / chip late).
 _LEAK_PRIORITY = (ROLE_SPELL, ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL)
 
 # Melee/tank defenders go just behind the enemy so it walks into them; ranged support further back.
 _TROOP_DEFENSE_DY = 45
 _SUPPORT_DEFENSE_DY = 85
+# card_knowledge placements: cycle cards right on the threat, tanks just in front of it.
+_ON_THREAT_DY = 10
+_FRONT_OF_THREAT_DY = 25
 # Spells land a little ahead of the enemy (it keeps walking toward our towers).
 _SPELL_LEAD_DY = 12
-# After defending a lane, ignore further pings there for this long unless the push gets deeper.
-DEFENSE_COOLDOWN_S = 4.0
-# ...shorter when that lane's tower is already low.
+# After defending a lane, ignore further pings there for this long unless the push grows,
+# gets deeper or our tower starts taking damage.
+DEFENSE_COOLDOWN_S = 5.0
 WEAK_TOWER_DEFENSE_COOLDOWN_S = 2.0
+DEFENSE_LOCK_S = 5.0
 _DEEPER_PUSH_DY = 40
-# How long offense keeps favoring the lane we just defended.
+_LOCK_HP_DROP = 0.08
+_LOCK_GROWTH_READS = 2
+# Growth reads closer together than this are the same frame (observe + choose both ask).
+_LOCK_GROWTH_MIN_GAP_S = 0.15
+# How long offense keeps favoring the lane we just defended, and how much it may spend there.
 COUNTER_PUSH_WINDOW_S = 12.0
+COUNTER_PUSH_SPEND_CAP = 4
+# A surviving defender this far up (y below it) makes a counter-push worth it.
+_COUNTER_PUSH_FRIEND_Y = 330
 # How long after a win condition we prefer backing it up with support.
 SUPPORT_FOLLOW_UP_S = 8.0
 # The opening play happens within this window (later first plays are just normal offense).
 OPENING_WINDOW_S = 25.0
-# From here on (overtime-ish) spells are worth throwing at towers for chip damage.
-SPELL_CHIP_AFTER_S = 150.0
 
-# Tower health (0..1 fractions of the HP bar, median of recent reads).
+# Match phases (seconds on the match clock).
+PHASE_SINGLE = "single"
+PHASE_DOUBLE = "double"
+PHASE_OT2 = "ot2"
+PHASE_OT3 = "ot3"
+_OVERTIME = (PHASE_OT2, PHASE_OT3)
+# Last 15 s of overtime: chip whatever tower is lowest to win the tiebreak.
+OT_TIEBREAK_CHIP_S = 285.0
+
+# Tower health (0..1 fractions of the HP bar, median of the reads from the last few seconds).
 WEAK_TOWER_HP = 0.4
 FINISH_TOWER_HP = 0.25
 LANE_SWITCH_HP_MARGIN = 0.15
-_TOWER_HISTORY = 5
+TOWER_WINDOW_S = 3.0
+_TOWER_HISTORY = 50
 
 # Push grouping: enemy units within this distance of the lead count as one push.
 _PUSH_RADIUS = 60
-# 3+ markers bunched up = a swarm (Minion Horde, Skarmy, Gob Gang, Bats...).
+# With unrecognized units, this many bunched markers is a swarm worth a spell (3 is often
+# a tank + support, e.g. Golem + Night Witch + Baby Dragon).
+_SWARM_MARKERS = 4
+# 3+ units in one push = a big push (opponent pattern detection).
 _SWARM_COUNT = 3
 # A friendly troop this close to the lead enemy means it's already being dealt with.
 _HANDLED_RADIUS = 55
 # A lone enemy this deep is hitting (or about to hit) our tower — stun/reset it.
 _TOWER_DIVE_Y = 375
 STUN_COOLDOWN_S = 6.0
+# Short on elixir: still answer (with a 1-2 cost card) once the push is this close to the tower.
+_AT_TOWER_Y = 335
+_SHORT_DEFENSE_MAX_COST = 2
 # Defenders engage here or deeper so our tower helps (don't meet the enemy at the bridge).
 _TOWER_PULL_Y = 365
 # Ranged support sits this far toward the middle so splash on the lane misses it.
 _SUPPORT_SIDE_DX = 35
+# Unknown-kind lone pushes might be air (Balloon, Minions): ground-only defenders score worse.
+_AIR_HEDGE_PENALTY = 0.6
+_UNKNOWN_PENALTY = 0.5
 # Elixir kept back for defense after an offensive play (more vs bridge spam).
 DEFENSE_RESERVE = 3
 PRESSURE_DEFENSE_RESERVE = 4
-# Tanks start at the back only with this much elixir.
-BACK_TANK_MIN_ELIXIR = 9
+# Phase thresholds: bridge plays without a reason, tanks at the back, cycling.
+NEAR_LEAK_BY_PHASE = {PHASE_SINGLE: 9, PHASE_DOUBLE: 8, PHASE_OT2: 8, PHASE_OT3: 7}
+BACK_TANK_MIN_BY_PHASE = {PHASE_SINGLE: 9, PHASE_DOUBLE: 7, PHASE_OT2: 7, PHASE_OT3: 7}
+CYCLE_MIN_BY_PHASE = {PHASE_SINGLE: 7, PHASE_DOUBLE: 6, PHASE_OT2: 6, PHASE_OT3: 5}
+NEAR_LEAK_ELIXIR = NEAR_LEAK_BY_PHASE[PHASE_SINGLE]
+BACK_TANK_MIN_ELIXIR = BACK_TANK_MIN_BY_PHASE[PHASE_SINGLE]
+CYCLE_MIN_ELIXIR = CYCLE_MIN_BY_PHASE[PHASE_SINGLE]
 BACK_TANK_FOLLOW_UP_S = 14.0
-# Bridge plays without a reason (no win condition, no follow-up) only near a leak.
-NEAR_LEAK_ELIXIR = 9
+# After a tank goes down at the back, troop follow-ups wait for it to reach the bridge.
+FOLLOW_UP_HOLD_S = 7.5
+TANK_SPEED_PX_S = 22.0
+_FOLLOW_BEHIND_DY = 35
+_TANK_AT_BRIDGE_Y = 340
+# Threat memory: a push seen this recently still counts when a frame misses it.
+THREAT_MEMORY_S = 2.0
+SPELL_BLOCK_MEMORY_S = 3.0
 # Cheap cards cycled at the back to bring the win condition back around.
 _CYCLE_MAX_COST = 3
 _RECENT_PENALTY = 1.5
-CYCLE_MIN_ELIXIR = 7
+# Our own deck: the slot the game couldn't read, and its label once 7 cards are known.
+UNKNOWN_CARD = "UNKNOWN"
+DECK_X = "deck_x"
+_INFER_WIN_KNOWN = 6
+_INFER_WIN_PLAYS = 8
 
 # Opponent pattern detection.
 _PUSH_GAP_S = 3.0
@@ -318,15 +387,13 @@ PUNISH_DEFENSE_RESERVE = 2
 
 
 def _base_card_id(card_id: str) -> str:
-    for prefix in ("evo_", "hero_"):
-        if card_id.startswith(prefix):
-            return card_id[len(prefix) :]
-    return card_id
+    """Base card id: evo_/hero_ prefixes and detection aliases removed (see ``card_knowledge``)."""
+    return ck.base_card_id(card_id)
 
 
 def card_role(card_id: str | None) -> str:
     """Classify a detected card id into the role the brain plays it as."""
-    if not card_id or card_id == "UNKNOWN":
+    if not card_id or card_id in (UNKNOWN_CARD, DECK_X):
         return ROLE_TROOP
     base = _base_card_id(card_id)
     group = get_card_group(card_id)
@@ -340,6 +407,8 @@ def card_role(card_id: str | None) -> str:
         return ROLE_SPELL
     if base in BUILDINGS or group == "defense_building":
         return ROLE_BUILDING
+    if base in MELEE_SWARMS:
+        return ROLE_TROOP
     if group in _SUPPORT_GROUPS:
         return ROLE_SUPPORT
     return ROLE_TROOP
@@ -363,13 +432,21 @@ def unit_traits(kind: str | None) -> UnitTraits | None:
 
 
 def card_cost(card_id: str | None) -> int:
-    if not card_id or card_id == "UNKNOWN":
+    if not card_id or card_id in (UNKNOWN_CARD, DECK_X):
         return _DEFAULT_COST
-    return ELIXIR_COST.get(_base_card_id(card_id), _DEFAULT_COST)
+    base = _base_card_id(card_id)
+    if base in ELIXIR_COST:
+        return ELIXIR_COST[base]
+    info = ck.card_info(base)
+    return info.cost if info is not None else _DEFAULT_COST
 
 
 def _is(card_id: str, group: frozenset[str]) -> bool:
     return _base_card_id(card_id) in group
+
+
+def _known(card_id: str | None) -> bool:
+    return bool(card_id) and card_id not in (UNKNOWN_CARD, DECK_X)
 
 
 def lane_of(x: float) -> str:
@@ -378,6 +455,31 @@ def lane_of(x: float) -> str:
 
 def _clamp(value: float, lo: float, hi: float) -> int:
     return int(max(lo, min(hi, value)))
+
+
+def match_phase(elapsed_s: float) -> str:
+    """single (0-2:00) / double (2:00-3:00) / ot2 (first minute of overtime) / ot3 (after)."""
+    if elapsed_s < 120:
+        return PHASE_SINGLE
+    if elapsed_s < 180:
+        return PHASE_DOUBLE
+    if elapsed_s < 240:
+        return PHASE_OT2
+    return PHASE_OT3
+
+
+class MatchClock:
+    """Seconds since the match started, on an injectable clock."""
+
+    def __init__(self, start: float | None = None, clock: Callable[[], float] = time.time) -> None:
+        self._clock = clock
+        self.start = clock() if start is None else start
+
+    def elapsed(self) -> float:
+        return self._clock() - self.start
+
+    def phase(self) -> str:
+        return match_phase(self.elapsed())
 
 
 def _avoid_own_towers(x: int, y: int) -> tuple[int, int]:
@@ -396,9 +498,11 @@ def _avoid_own_towers(x: int, y: int) -> tuple[int, int]:
 def defensive_drop(role: str, threat: EnemyUnit, card_id: str | None = None) -> tuple[int, int]:
     """Where to put a card of ``role`` to answer ``threat``.
 
-    Troops never land on top of the enemy (they'd eat its splash/burst before doing
+    Troops never land on top of a big enemy (they'd eat its splash/burst before doing
     anything): melee goes behind it, deep enough that our tower helps; ranged support
-    stays further back and off toward the middle.
+    stays further back and off toward the middle. With a ``card_id`` that
+    ``card_knowledge`` knows, its ``def_place`` decides instead (cycle cards ON the
+    threat, tanks in FRONT of it, buildings at the PULL spot).
     """
     left, top, right, bottom = PLAYABLE_PLAY_REGION_LTRB
     y_min, y_max = OWN_HALF_DROP_Y_RANGE
@@ -408,6 +512,18 @@ def defensive_drop(role: str, threat: EnemyUnit, card_id: str | None = None) -> 
         spell_top = y_min if role == ROLE_OWN_SIDE_SPELL else top
         lead = 30 if card_id and _is(card_id, _ROLLING_SPELLS) else _SPELL_LEAD_DY
         return _clamp(threat.x, left, right), _clamp(threat.y + lead, spell_top, bottom)
+    info = ck.card_info(card_id)
+    if info is not None:
+        if info.def_place == ck.PULL:
+            return DEFENSE_BUILDING_PULL_COORDS[threat.lane]
+        if info.def_place in (ck.ON, ck.FRONT):
+            dy = _ON_THREAT_DY if info.def_place == ck.ON else _FRONT_OF_THREAT_DY
+            y = _clamp(max(threat.y + dy, _TOWER_PULL_Y), y_min, y_max)
+            return _avoid_own_towers(_clamp(threat.x, left, right), y)
+        if info.def_place == ck.BACK:
+            role = ROLE_SUPPORT
+        elif info.def_place == ck.BEHIND:
+            role = ROLE_TROOP
     x = _clamp(threat.x, left, right)
     if role == ROLE_SUPPORT:
         toward_middle = _SUPPORT_SIDE_DX if threat.lane == "left" else -_SUPPORT_SIDE_DX
@@ -430,13 +546,37 @@ class EnemyPush:
     count: int
     handled: bool  # one of our troops is already fighting it
     kinds: tuple[str, ...] = ()  # recognized unit types in the push (unit_classifier)
+    first_count: int = 0  # unit count when this push was first seen (tracked by the brain)
 
     def _traits(self) -> list[UnitTraits]:
         return [t for t in map(unit_traits, self.kinds) if t is not None]
 
+    def _bases(self) -> set[str]:
+        return {_base_card_id(k) for k in self.kinds}
+
     @property
     def swarm(self) -> bool:
-        return self.count >= _SWARM_COUNT or any(t.swarm for t in self._traits())
+        """Many weak bodies: unknown kinds need 4+ markers; known kinds need a swarm card
+        with 2+ markers (or 3+ when first seen, or one that is a big group by itself)."""
+        traits = self._traits()
+        if not traits:
+            return self.count >= _SWARM_MARKERS
+        if not any(t.swarm for t in traits):
+            return False
+        return self.count >= 2 or self.first_count >= _SWARM_COUNT or bool(self._bases() & _ONE_MARKER_SWARMS)
+
+    @property
+    def spellable(self) -> bool:
+        """A swarm an area spell actually kills (not Barbarians / Guards / Recruits)."""
+        if not self.kinds:
+            return self.count >= _SWARM_MARKERS
+        bases = self._bases() & SPELLABLE_SWARMS
+        if not bases:
+            return self.count >= _SWARM_MARKERS and self.swarm
+        if bases & _ONE_MARKER_SWARMS:
+            return True
+        need = _SWARM_MARKERS if bases <= _CHEAP_SWARMS else 2
+        return max(self.count, self.first_count) >= need
 
     @property
     def air(self) -> bool:
@@ -467,34 +607,114 @@ def summarize_pushes(threats: Sequence[EnemyUnit], friends: Sequence[EnemyUnit] 
 
 
 class DeckTracker:
-    """Our own 8-card deck and its rotation, learned from the hand during the battle."""
+    """Our own 8-card deck and its rotation, learned from the hand during the battle.
+
+    Card ids are kept as base ids (``evo_furnace`` and ``furnace`` are one card). Plays are
+    logged with their hand slot: the card that refills slot ``s`` after a play is the one
+    played 4 deployed plays earlier, which names a slot the card reader can't identify.
+    """
 
     def __init__(self) -> None:
         self.deck: list[str] = []
         self._order: list[str] = []  # played cards, oldest first (= next to come back)
+        self.plays: list[tuple[int | None, str, bool]] = []  # (slot, card, deployed)
+        # Elixir cost bounds (lo, hi) of the UNKNOWN card in each slot, from affordability.
+        self.cost_bounds: dict[int, tuple[int, int]] = {}
+        self._warned_unknown = False
+
+    def _label(self, card_id: str | None) -> str | None:
+        """Base id for a known card, ``deck_x`` for the unreadable 8th card, else None."""
+        if not card_id:
+            return None
+        if card_id == UNKNOWN_CARD:
+            return DECK_X if len(self.deck) >= 7 else None
+        return _base_card_id(card_id)
+
+    def _hand_labels(self, hand: Sequence[str]) -> set[str]:
+        return {label for label in map(self._label, hand) if label}
 
     def observe_hand(self, hand: Sequence[str]) -> None:
         for card in hand:
-            if card and card != "UNKNOWN" and card not in self.deck and len(self.deck) < 8:
-                self.deck.append(card)
+            if not _known(card):
+                continue
+            base = _base_card_id(card)
+            if base not in self.deck and len(self.deck) < 8:
+                self.deck.append(base)
+        if UNKNOWN_CARD in hand and not self._warned_unknown:
+            self._warned_unknown = True
+            _log.warning("A hand slot reads as UNKNOWN — playing it last; check the card fingerprints")
 
-    def played(self, card_id: str) -> None:
+    def observe_costs(self, full_hand: Mapping[int, str], affordable: set[int], elixir: int) -> None:
+        """Narrow the UNKNOWN slots' cost: affordable at ``elixir`` means cost <= elixir, else > elixir."""
+        for slot, card in full_hand.items():
+            if card != UNKNOWN_CARD:
+                continue
+            lo, hi = self.cost_bounds.get(slot, (1, 10))
+            if slot in affordable:
+                hi = min(hi, elixir)
+            else:
+                lo = max(lo, elixir + 1)
+            self.cost_bounds[slot] = (lo, max(lo, hi))
+
+    def resolve_unknown(self, slot: int) -> str | None:
+        """The card now in ``slot``: the one played 4 deployed plays before that slot's last play."""
+        deployed = [(s, c) for s, c, d in self.plays if d]
+        for i in range(len(deployed) - 1, -1, -1):
+            if deployed[i][0] == slot:
+                j = i - 4
+                card = deployed[j][1] if j >= 0 else None
+                return _base_card_id(card) if card is not None and _known(card) else None
+        return None
+
+    def played(self, card_id: str, slot: int | None = None, deployed: bool = True) -> None:
+        """Log a play from ``slot``; ``deployed=False`` = tapped but the card never went down."""
+        if card_id == UNKNOWN_CARD and slot is not None:
+            card_id = self.resolve_unknown(slot) or card_id
+        self.plays.append((slot, card_id, deployed))
+        if not deployed:
+            return
+        if slot is not None:
+            self.cost_bounds.pop(slot, None)  # a new card fills the slot
         self.observe_hand([card_id])
-        self._order = [c for c in self._order if c != card_id] + [card_id]
+        label = self._label(card_id)
+        if label:
+            self._order = [c for c in self._order if c != label] + [label]
 
     def queue(self, hand: Sequence[str]) -> list[str]:
         """Cards not in hand, in the order they'll come back (first = next card)."""
-        return [c for c in self._order if c not in hand]
+        in_hand = self._hand_labels(hand)
+        return [c for c in self._order if c not in in_hand]
 
     def plays_until(self, card_id: str, hand: Sequence[str]) -> int | None:
         """How many plays until ``card_id`` is back in hand (0 = in hand, None = unknown)."""
-        if card_id in hand:
+        label = self._label(card_id)
+        if not label:
+            return None
+        if label in self._hand_labels(hand):
             return 0
         queue = self.queue(hand)
-        return queue.index(card_id) + 1 if card_id in queue else None
+        return queue.index(label) + 1 if label in queue else None
+
+    def inferred_win(self) -> str | None:
+        """No real win condition in the deck: the most expensive tank / bridge card carries it
+        (Giant Skeleton in a deck with no Hog/Giant/Balloon...). Needs enough of the deck seen."""
+        if any(card_role(c) == ROLE_WIN for c in self.deck):
+            return None
+        deployed = sum(1 for *_, d in self.plays if d)
+        if len(self.deck) < _INFER_WIN_KNOWN and deployed < _INFER_WIN_PLAYS:
+            return None
+        candidates = [
+            c
+            for c in self.deck
+            if card_role(c) not in (ROLE_SPELL, ROLE_OWN_SIDE_SPELL)
+            and (ck.has_role(c, ck.TANK, ck.WIN2) or get_card_group(c) == "bridge_line")
+        ]
+        return max(candidates, key=card_cost) if candidates else None
 
     def win_conditions(self) -> list[str]:
-        return [c for c in self.deck if card_role(c) == ROLE_WIN]
+        wins = [c for c in self.deck if card_role(c) == ROLE_WIN]
+        inferred = self.inferred_win()
+        return [*wins, inferred] if inferred and inferred not in wins else wins
 
 
 class OpponentDeck:
@@ -614,6 +834,21 @@ class Play:
     lane: str
     defensive: bool
     reason: str
+    threat_y: int | None = None  # y of the threat a defensive play answered
+
+
+@dataclass
+class _DefenseCommit:
+    """A lane we just defended: locked until the push grows, gets deeper or hurts the tower."""
+
+    at: float
+    threat_y: int
+    count: int
+    own_hp: float | None
+    growth: set[float]
+
+
+Card = tuple[int, str, str]  # (hand slot, card id, role)
 
 
 def _other(lane: str) -> str:
@@ -629,56 +864,98 @@ class BattleBrain:
         self.attack_lane = self._rng.choice(("left", "right"))
         self._counter_push_lane: str | None = None
         self._counter_push_until = 0.0
+        self._counter_push_spent = 0
         self._last_defense: dict[str, tuple[float, int]] = {}  # lane -> (time, threat y)
+        self._commits: dict[str, _DefenseCommit] = {}
         # Our last win-condition drop: lane, time, how long to keep backing it up.
         self._last_win: tuple[str, float, float] | None = None
+        self._back_tank_drop: tuple[str, float] | None = None
         self._last_stun = -1e9
         self._played_any = False
-        self._enemy_hp: dict[str, collections.deque[float]] = {
+        self._enemy_hp: dict[str, collections.deque[tuple[float, float]]] = {
             lane: collections.deque(maxlen=_TOWER_HISTORY) for lane in ("left", "right")
         }
-        self._own_hp: dict[str, collections.deque[float]] = {
+        self._own_hp: dict[str, collections.deque[tuple[float, float]]] = {
             lane: collections.deque(maxlen=_TOWER_HISTORY) for lane in ("left", "right")
         }
+        self._threat_memory: dict[str, tuple[float, EnemyUnit]] = {}
+        self._first_count: dict[str, int] = {}
+        self._pushes: dict[str, EnemyPush] = {}
+        self._friends: list[EnemyUnit] = []
+        self._phase = PHASE_SINGLE
+        self._hold_reason = ""
         self.recent: list[int] = []
         self.deck = DeckTracker()
         self.opponent = OpponentModel(clock)
         self.situation = ""
 
-    def _pick(self, candidates: list[tuple[int, str, str]]) -> tuple[int, str, str]:
-        """Prefer cards not played recently (keeps the cycle moving), then random."""
-        fresh = [c for c in candidates if c[0] not in self.recent]
-        return self._rng.choice(fresh or candidates)
+    def _pick(self, candidates: list[Card]) -> Card:
+        """Prefer known cards, then cards not played recently (keeps the cycle moving), then random."""
+        known = [c for c in candidates if _known(c[1])] or candidates
+        fresh = [c for c in known if c[0] not in self.recent]
+        return self._rng.choice(fresh or known)
 
-    def _cheapest(self, candidates: list[tuple[int, str, str]], target: int = 0) -> tuple[int, str, str]:
+    def _cheapest(
+        self, candidates: list[Card], target: int = 0, penalty: Callable[[Card], float] | None = None
+    ) -> Card:
         """The card whose cost is closest to ``target`` (0 = just the cheapest).
 
-        Recently played slots get a penalty so one card isn't spammed every time.
+        Recently played slots and the unreadable card get a penalty so one card isn't spammed
+        every time and a known card wins a tie.
         """
 
-        def score(card: tuple[int, str, str]) -> float:
-            return abs(card_cost(card[1]) - target) + (_RECENT_PENALTY if card[0] in self.recent else 0)
+        def score(card: Card) -> float:
+            value = abs(card_cost(card[1]) - target) + (_RECENT_PENALTY if card[0] in self.recent else 0)
+            if not _known(card[1]):
+                value += _UNKNOWN_PENALTY
+            return value + (penalty(card) if penalty else 0)
 
         best = min(score(c) for c in candidates)
         return self._rng.choice([c for c in candidates if score(c) == best])
 
+    def _role(self, card_id: str) -> str:
+        """Offense role: the inferred win condition (e.g. Giant Skeleton) plays as ROLE_WIN."""
+        inferred = self.deck.inferred_win()
+        if inferred and _known(card_id) and _base_card_id(card_id) == inferred:
+            return ROLE_WIN
+        return card_role(card_id)
+
+    def _is_back_tank(self, card_id: str) -> bool:
+        if not _known(card_id):
+            return False
+        return _is(card_id, BACK_TANKS) or ck.has_role(card_id, ck.WIN2) or card_id == self.deck.inferred_win()
+
     # ---- towers --------------------------------------------------------------
 
     def observe_towers(self, health: TowerHealth | None) -> None:
-        """Feed one tower-HP read; a median over recent reads smooths troops covering the bars."""
+        """Feed one tower-HP read; a median over the last few seconds smooths troops covering the bars.
+
+        Missing or None values (unreadable bar) are skipped, not counted as a dead tower.
+        """
         if health is None:
             return
-        for lane in ("left", "right"):
-            self._enemy_hp[lane].append(health.enemy.get(lane, 0.0))
-            self._own_hp[lane].append(health.own.get(lane, 0.0))
+        now = self._clock()
+        for side, store in (("enemy", self._enemy_hp), ("own", self._own_hp)):
+            values = getattr(health, side, None)
+            if not values:
+                continue
+            for lane in ("left", "right"):
+                value = values.get(lane)
+                if value is not None:
+                    store[lane].append((now, float(value)))
+
+    @staticmethod
+    def _median(reads: collections.deque[tuple[float, float]]) -> float | None:
+        if not reads:
+            return None
+        latest = reads[-1][0]
+        return statistics.median(hp for t, hp in reads if latest - t <= TOWER_WINDOW_S)
 
     def enemy_tower_hp(self, lane: str) -> float | None:
-        reads = self._enemy_hp[lane]
-        return statistics.median(reads) if reads else None
+        return self._median(self._enemy_hp[lane])
 
     def own_tower_hp(self, lane: str) -> float | None:
-        reads = self._own_hp[lane]
-        return statistics.median(reads) if reads else None
+        return self._median(self._own_hp[lane])
 
     def _own_tower_weak(self, lane: str) -> bool:
         hp = self.own_tower_hp(lane)
@@ -704,25 +981,83 @@ class BattleBrain:
             return PUNISH_DEFENSE_RESERVE
         return PRESSURE_DEFENSE_RESERVE if self.opponent.style() == ARCHETYPE_PRESSURE else DEFENSE_RESERVE
 
+    # ---- defense sizing, locks, memory -----------------------------------------
+
+    def _summarize(
+        self, threats: Sequence[EnemyUnit], friends: Sequence[EnemyUnit], track: bool = False
+    ) -> dict[str, EnemyPush]:
+        """summarize_pushes plus the count each push had when first seen."""
+        pushes = summarize_pushes(threats, friends)
+        if track:
+            self._first_count = {lane: self._first_count.get(lane, p.count) for lane, p in pushes.items()}
+        return {lane: replace(p, first_count=self._first_count.get(lane, p.count)) for lane, p in pushes.items()}
+
+    def defense_budget(self, threat: EnemyPush | EnemyUnit) -> int:
+        """Elixir a defense against ``threat`` needs: 3 for a lone troop, 4 for two, 5 for a big
+        push or a tank (3 for a swarm a spell clears). Units use their lane's last push."""
+        push = threat if isinstance(threat, EnemyPush) else self._pushes.get(threat.lane)
+        if push is None:
+            return 3
+        if push.spellable:
+            return 3
+        if push.tank or push.count >= 3:
+            return 5
+        return 4 if push.count == 2 else 3
+
+    def note_threat(self, threat: EnemyPush | EnemyUnit, now: float | None = None) -> None:
+        """Remember the latest threat per lane, so a frame that misses it doesn't flip to offense."""
+        unit = threat.lead if isinstance(threat, EnemyPush) else threat
+        self._threat_memory[unit.lane] = (self._clock() if now is None else now, unit)
+
+    def _remembered(self, within_s: float, exclude: Mapping[str, EnemyPush] | None = None) -> list[EnemyUnit]:
+        now = self._clock()
+        return [
+            unit
+            for lane, (at, unit) in self._threat_memory.items()
+            if now - at <= within_s and not (exclude and lane in exclude)
+        ]
+
+    def _lane_unlocked(self, threat: EnemyUnit, push: EnemyPush | None, now: float) -> bool:
+        commit = self._commits.get(threat.lane)
+        if commit is None:
+            return True
+        cooldown = WEAK_TOWER_DEFENSE_COOLDOWN_S if self._own_tower_weak(threat.lane) else DEFENSE_COOLDOWN_S
+        if now - commit.at >= max(cooldown, DEFENSE_LOCK_S):
+            return True
+        if threat.y > commit.threat_y + _DEEPER_PUSH_DY:
+            return True
+        if push is not None and push.count > commit.count:
+            if not commit.growth or now - max(commit.growth) >= _LOCK_GROWTH_MIN_GAP_S:
+                commit.growth.add(now)
+            if len(commit.growth) >= _LOCK_GROWTH_READS:
+                return True
+        hp = self.own_tower_hp(threat.lane)
+        return commit.own_hp is not None and hp is not None and commit.own_hp - hp > _LOCK_HP_DROP
+
     def should_defend_now(self, threats: Sequence[EnemyUnit], friends: Sequence[EnemyUnit] = ()) -> EnemyUnit | None:
         """Return the threat to answer immediately, or None if it's already handled.
 
-        Threats against a low tower come first; otherwise the deepest one. A small push
-        our troops are already fighting is left to them (no wasted spell on a dying unit).
+        Threats against a low tower come first (the lowest tower in overtime); otherwise the
+        deepest one. A push our troops already outnumber is left to them, and a lane we just
+        defended stays locked unless the push grows, gets deeper or hurts the tower.
         """
         now = self._clock()
-        pushes = summarize_pushes(threats, friends)
-        ordered = sorted(threats, key=lambda t: (not self._own_tower_weak(t.lane), -t.y))
+        pushes = self._summarize(threats, friends)
+        self._pushes = pushes
+        if self._phase in _OVERTIME:
+            ordered = sorted(threats, key=lambda t: (self.own_tower_hp(t.lane) or 1.0, -t.y))
+        else:
+            ordered = sorted(threats, key=lambda t: (not self._own_tower_weak(t.lane), -t.y))
         for threat in ordered:
             push = pushes.get(threat.lane)
-            if push and push.handled and not push.swarm and not self._own_tower_weak(threat.lane):
-                continue
-            last = self._last_defense.get(threat.lane)
-            if last is None:
-                return threat
-            when, defended_y = last
-            cooldown = WEAK_TOWER_DEFENSE_COOLDOWN_S if self._own_tower_weak(threat.lane) else DEFENSE_COOLDOWN_S
-            if now - when >= cooldown or threat.y > defended_y + _DEEPER_PUSH_DY:
+            if push and push.handled:
+                lead = push.lead
+                near = sum(
+                    1 for f in friends if abs(f.x - lead.x) <= _HANDLED_RADIUS and abs(f.y - lead.y) <= _HANDLED_RADIUS
+                )
+                if (not push.swarm and not self._own_tower_weak(threat.lane)) or near >= push.count:
+                    continue
+            if self._lane_unlocked(threat, push, now):
                 return threat
         return None
 
@@ -736,107 +1071,149 @@ class BattleBrain:
         elixir_full: bool = False,
         elixir: int | None = None,
         friends: Sequence[EnemyUnit] = (),
+        clock: MatchClock | float | None = None,
+        full_hand: Mapping[int, str] | None = None,
+        affordable: set[int] | None = None,
     ) -> Play | None:
         """Pick a play from the playable ``hand`` (index -> card id), or None to hold.
 
         ``elixir`` (0-10) turns on elixir discipline; without it the brain only knows
-        whether elixir is full.
+        whether elixir is full. ``clock`` (a MatchClock or seconds since the match started)
+        overrides ``elapsed_s`` for the match phase. ``full_hand`` (all 4 slots) lets the
+        deck tracker narrow the cost of an unreadable card.
         """
-        pushes = summarize_pushes(threats, friends)
+        if isinstance(clock, MatchClock):
+            elapsed_s = clock.elapsed()
+        elif clock is not None:
+            elapsed_s = float(clock)
+        self._phase = match_phase(elapsed_s)
+        self._friends = list(friends)
+        hand = {i: (self.deck.resolve_unknown(i) or c) if c == UNKNOWN_CARD else c for i, c in hand.items()}
+        pushes = self._summarize(threats, friends, track=True)
+        self._pushes = pushes
         self.opponent.observe(pushes, threats)
         self.deck.observe_hand(list(hand.values()))
+        if full_hand is not None and elixir is not None:
+            self.deck.observe_costs(full_hand, set(hand) if affordable is None else affordable, elixir)
         if elixir is not None and elixir >= 10:
             elixir_full = True
         self.situation = self._describe(elixir, pushes)
+        now = self._clock()
+        for push in pushes.values():
+            self.note_threat(push, now)
         if not hand:
             return None
         cards = [(index, card_id, card_role(card_id)) for index, card_id in hand.items()]
+        self._hold_reason = ""
 
         threat = self.should_defend_now(threats, friends) if threats else None
         if threat is not None:
             push = pushes.get(threat.lane) or EnemyPush(threat.lane, threat, (threat.x, threat.y), 1, False)
-            play = self._defend(cards, push, threat)
-            if play is not None:
+            play = self._defend(cards, push, threat, elixir)
+            if play is not None or self._hold_reason:
                 return play
-            # Nothing that defends — pressure the other lane instead.
-            lane = _other(threat.lane)
-            priorities, reason = _OFFENSE_PRIORITY, f"pressuring the {lane} lane"
-        elif self._is_opening(elapsed_s) and any(c[2] in _OPENING_PRIORITY for c in cards):
+            # Nothing that defends — pressure the other lane instead (never with a spell).
+            return self._offense(cards, _other(threat.lane), "pressure", elapsed_s, elixir, elixir_full, pushes)
+
+        # A push seen a moment ago that this frame missed: answer it or wait, never attack.
+        missed = self._remembered(THREAT_MEMORY_S, exclude=pushes)
+        if missed:
+            remembered = self.should_defend_now(missed, friends)
+            if remembered is None:
+                return None
+            push = EnemyPush(remembered.lane, remembered, (remembered.x, remembered.y), 1, False)
+            return self._defend(cards, push, remembered, elixir, allow_spells=False)
+
+        if self._is_opening(elapsed_s) and any(c[2] in _OPENING_PRIORITY for c in cards):
             lane = self.offense_lane()
             options = [c for c in cards if c[2] in _OPENING_PRIORITY]
+            options = [c for c in options if _known(c[1])] or options
             index, card_id, picked = self._cheapest(options) if elixir is not None else self._pick(options)
             return Play(index, card_id, picked, OPENING_BACK_COORDS[lane], lane, False, "opening at the back")
-        elif self._following_up():
+        if self._following_up():
             assert self._last_win is not None
-            lane = self._last_win[0]
-            priorities, reason = _FOLLOW_UP_PRIORITY, f"backing up the push in the {lane} lane"
-        else:
-            lane = self.offense_lane()
-            priorities, reason = _OFFENSE_PRIORITY, f"pushing the {lane} lane"
-            tank = self._back_tank(cards, lane, elixir, elixir_full)
-            if tank is not None:
-                return tank
-            if elixir is not None and not elixir_full:
-                cycle = self._cycle(cards, lane, elixir)
-                if cycle is not None:
-                    return cycle
+            return self._offense(cards, self._last_win[0], "follow", elapsed_s, elixir, elixir_full, pushes)
+        mode = "counter" if self._counter_pushing() else "normal"
+        return self._offense(cards, self.offense_lane(), mode, elapsed_s, elixir, elixir_full, pushes)
 
-        enemy_hp = self.enemy_tower_hp(lane)
-        finishing = enemy_hp is not None and 0 < enemy_hp <= FINISH_TOWER_HP
-        spell_worth_it = finishing or elapsed_s >= SPELL_CHIP_AFTER_S
-        if spell_worth_it:
-            priorities = (*priorities, ROLE_SPELL)
-        if elixir_full:
-            priorities = (*priorities, *_LEAK_PRIORITY)
-
-        for role in dict.fromkeys(priorities):  # de-dupe, keep order
-            options = [c for c in cards if c[2] == role and self._affordable_on_offense(c, elixir, elixir_full)]
-            if role == ROLE_WIN and elixir is not None and not elixir_full:
-                # Back tanks wait for the full-elixir push (see _back_tank), never a naked bridge drop.
-                options = [c for c in options if not _is(c[1], BACK_TANKS)]
-            if not options:
-                continue
-            index, card_id, picked = self._pick(options)
-            coord = self._offense_drop(card_id, picked, lane, elapsed_s)
-            if coord is None:
-                continue
-            if picked == ROLE_SPELL and spell_worth_it:
-                why = f"finishing the {lane} tower" if finishing else "chipping the tower"
-            elif picked in _LEAK_PRIORITY:
-                why = "spending elixir before it leaks"
-            else:
-                why = reason
-            return Play(index, card_id, picked, coord, lane, False, why)
-        return None
-
-    def _defend(self, cards: list[tuple[int, str, str]], push: EnemyPush, threat: EnemyUnit) -> Play | None:
+    def _defend(
+        self,
+        cards: list[Card],
+        push: EnemyPush,
+        threat: EnemyUnit,
+        elixir: int | None = None,
+        allow_spells: bool = True,
+    ) -> Play | None:
+        """Answer ``threat``; None with ``self._hold_reason`` set means "wait", not "can't"."""
         lane = threat.lane
+        self._hold_reason = ""
+        # Air answers matter when the push is led by (or made only of) air units — a Baby
+        # Dragon behind a Golem doesn't make Lumberjack useless.
+        lead_traits = unit_traits(threat.kind)
+        air_threat = (
+            lead_traits.air if lead_traits is not None else bool(push.kinds) and all(t.air for t in push._traits())
+        )
 
-        def play(card: tuple[int, str, str], coord: tuple[int, int], why: str) -> Play:
-            return Play(card[0], card[1], card[2], coord, lane, True, why)
+        def play(card: Card, coord: tuple[int, int], why: str) -> Play:
+            return Play(card[0], card[1], card[2], coord, lane, True, why, threat.y)
 
         # 1. A lone heavy hitter at our tower: stun it (resets Inferno/Sparky/charges, knocks back divers).
         if push.count <= 2 and threat.y >= _TOWER_DIVE_Y and self._clock() - self._last_stun >= STUN_COOLDOWN_S:
-            stuns = [c for c in cards if _is(c[1], STUN_CARDS)]
+            stuns = [c for c in cards if _is(c[1], STUN_CARDS) and (allow_spells or c[2] != ROLE_SPELL)]
             if stuns:
                 card = self._cheapest(stuns)
                 role = ROLE_SPELL if card[2] == ROLE_SPELL else ROLE_TROOP
                 return play(card, defensive_drop(role, threat, card[1]), f"stunning the {lane} lane push to reset it")
 
-        # 2. Swarm: small spell on the group the moment it crosses.
-        if push.swarm:
-            spells = [c for c in cards if c[2] in (ROLE_SPELL, ROLE_OWN_SIDE_SPELL) and _is(c[1], SMALL_SPELLS)]
+        # 2. A real swarm: an area spell on the group the moment it crosses (a big one for a big swarm).
+        if push.spellable and allow_spells:
+            spells = [
+                c
+                for c in cards
+                if c[2] in (ROLE_SPELL, ROLE_OWN_SIDE_SPELL)
+                and _is(c[1], SMALL_SPELLS | BIG_SWARM_SPELLS)
+                and not _is(c[1], NO_KILL_SPELLS)
+                and not (push.air and _is(c[1], GROUND_ONLY_SPELLS))
+            ]
+            big = [c for c in spells if _is(c[1], BIG_SWARM_SPELLS)]
+            center = EnemyUnit(push.center[0], push.center[1], threat.size)
+            why = f"spelling the swarm in the {lane} lane"
+            if big:
+                card = self._cheapest(big)
+                return play(card, defensive_drop(card[2], center, card[1]), why)
+            # No big spell: an air-capable defender beats a small spell that leaves half the swarm.
+            hitters = [
+                c
+                for c in cards
+                if c[2] in (ROLE_TROOP, ROLE_SUPPORT, ROLE_BUILDING)
+                and not _is(c[1], SWARM_CARDS)
+                and (info := ck.card_info(c[1])) is not None
+                and info.targets_air
+            ]
+            if hitters and (not push.kinds or push.air):
+                card = self._cheapest(hitters)
+                return play(card, defensive_drop(card[2], threat, card[1]), f"defending the {lane} lane swarm")
             if spells:
                 card = self._cheapest(spells)
-                center = EnemyUnit(push.center[0], push.center[1], threat.size)
-                return play(card, defensive_drop(card[2], center, card[1]), f"spelling the swarm in the {lane} lane")
+                return play(card, defensive_drop(card[2], center, card[1]), why)
 
-        # 3. Cheapest troop/building that handles it. Swarm cards stay out of multi-unit pushes
+        # 3. Size the defense: short on elixir far from the tower, wait; at the tower, only a cheap card.
+        budget = self.defense_budget(push)
+        short = elixir is not None and elixir < budget
+        if short and threat.y < _AT_TOWER_Y:
+            self._hold_reason = f"saving {budget} elixir for the {lane} lane push"
+            return None
+
+        # 4. Cheapest troop/building that handles it. Swarm cards stay out of multi-unit pushes
         #    and away from splash (Bowler/Valkyrie/Wizard wipes them) — also when a splash card
         #    of theirs we've seen could be back in hand.
-        target = 3 if push.count == 1 else 4 if push.count == 2 else 5
+        target = 3 if push.count == 1 or (push.count == 3 and not push.kinds) else 4 if push.count == 2 else 5
         defenders = [c for c in cards if c[2] in (ROLE_TROOP, ROLE_SUPPORT, ROLE_BUILDING)]
-        if push.air:
+        any_troop = bool(defenders)
+        if short:
+            defenders = [c for c in defenders if card_cost(c[1]) <= _SHORT_DEFENSE_MAX_COST]
+        defenders = [c for c in defenders if _known(c[1])] or defenders
+        if air_threat:
             # Ground-only defenders can't touch Balloon/Minions; with no anti-air, fall through to spells.
             defenders = [c for c in defenders if not _is(c[1], GROUND_ONLY)]
         if push.count >= 2 or push.splash or self.opponent.deck.any_ready(SPLASH_UNITS):
@@ -846,61 +1223,290 @@ class BattleBrain:
             if killers:
                 defenders, target = killers, 5
         if defenders:
-            card = self._cheapest(defenders, target)
+            hedge = not push.kinds and push.count <= 2  # might be air: prefer cards that hit air
+
+            def air_hedge(card: Card) -> float:
+                return _AIR_HEDGE_PENALTY if hedge and _is(card[1], GROUND_ONLY) else 0.0
+
+            card = self._cheapest(defenders, target, air_hedge)
             return play(card, defensive_drop(card[2], threat, card[1]), f"defending the {lane} lane")
 
-        # 4. Any spell / own-side spell left.
-        for role in (ROLE_SPELL, ROLE_OWN_SIDE_SPELL):
-            options = [c for c in cards if c[2] == role]
-            if options:
-                card = self._cheapest(options)
-                return play(card, defensive_drop(role, threat, card[1]), f"defending the {lane} lane")
+        # 5. Spells on a 1-2 unit push only to save a weak tower, against a recognized air unit
+        #    nothing in hand can hit, or at the tower with no troop to play.
+        spells = [c for c in cards if c[2] in (ROLE_SPELL, ROLE_OWN_SIDE_SPELL)]
+        if not spells:
+            return None
+        desperate = self._own_tower_weak(lane) or air_threat or (threat.y >= _TOWER_DIVE_Y and not any_troop)
+        if allow_spells and (push.swarm or desperate):
+            card = self._cheapest(spells)
+            return play(card, defensive_drop(card[2], threat, card[1]), f"defending the {lane} lane")
+        self._hold_reason = f"not wasting a spell on the {lane} lane push"
         return None
 
-    def _affordable_on_offense(self, card: tuple[int, str, str], elixir: int | None, elixir_full: bool) -> bool:
+    # ---- offense ---------------------------------------------------------------
+
+    def _counter_window_open(self) -> bool:
+        return self._counter_push_lane is not None and self._clock() < self._counter_push_until
+
+    def _counter_pushing(self) -> bool:
+        """A counter-push needs a defender of ours that survived and is heading up the lane."""
+        if not self._counter_window_open():
+            return False
+        return any(f.lane == self._counter_push_lane and f.y < _COUNTER_PUSH_FRIEND_Y for f in self._friends)
+
+    def _following_up(self) -> bool:
+        return self._last_win is not None and self._clock() - self._last_win[1] < self._last_win[2]
+
+    def _back_tank_hold(self) -> bool:
+        """The back tank is still walking: troop follow-ups would arrive alone."""
+        if self._back_tank_drop is None or not self._following_up():
+            return False
+        lane, at = self._back_tank_drop
+        if self._clock() - at >= FOLLOW_UP_HOLD_S:
+            return False
+        return not any(f.lane == lane and f.y < _TANK_AT_BRIDGE_Y for f in self._friends)
+
+    def _behind_push(self, lane: str) -> tuple[int, int] | None:
+        """Just behind our most advanced troop in ``lane``, or where the back tank should be by now."""
+        y_min, y_max = OWN_HALF_DROP_Y_RANGE
+        ours = [f for f in self._friends if f.lane == lane and f.y < y_max]
+        if ours:
+            lead = min(ours, key=lambda f: f.y)
+            return _avoid_own_towers(lead.x, _clamp(lead.y + _FOLLOW_BEHIND_DY, y_min, y_max))
+        if self._back_tank_drop is not None and self._back_tank_drop[0] == lane:
+            back_x, back_y = BACK_TANK_COORDS[lane]
+            tank_y = back_y - TANK_SPEED_PX_S * (self._clock() - self._back_tank_drop[1])
+            progress = max(0.0, min(1.0, (back_y - tank_y) / (back_y - y_min)))
+            x = int(back_x + (LANE_BRIDGE_X[lane] - back_x) * progress)
+            return _avoid_own_towers(x, _clamp(tank_y + _FOLLOW_BEHIND_DY, y_min, y_max))
+        return None
+
+    def _last_swarm_answer(self, card_id: str, hand_ids: Sequence[str]) -> bool:
+        """``card_id`` is the only swarm spell in hand and none comes back within 2 plays."""
+        if not _is(card_id, SMALL_SPELLS):
+            return False
+        base = _base_card_id(card_id)
+        if any(_known(c) and _is(c, SMALL_SPELLS) and _base_card_id(c) != base for c in hand_ids):
+            return False
+        for other in self.deck.deck:
+            if other != base and other in SMALL_SPELLS:
+                n = self.deck.plays_until(other, hand_ids)
+                if n is not None and n <= 2:
+                    return False
+        return True
+
+    def _finishing_spell(self, cards: list[Card]) -> Play | None:
+        """A spell that kills an enemy princess tower outright (0 < hp <= what the spell removes)."""
+        best: tuple[float, Card, str] | None = None
+        for card in cards:
+            if card[2] != ROLE_SPELL:
+                continue
+            fraction = SPELL_TOWER_FRACTION.get(_base_card_id(card[1]), 0.0)
+            for lane in ("left", "right"):
+                hp = self.enemy_tower_hp(lane)
+                if hp is not None and 0 < hp <= fraction and (best is None or hp < best[0]):
+                    best = (hp, card, lane)
+        if best is None:
+            return None
+        _, card, lane = best
+        coord = ENEMY_PRINCESS_TOWER_CENTERS[lane]
+        return Play(card[0], card[1], card[2], coord, lane, False, f"finishing the {lane} tower")
+
+    def _tiebreak_chip(self, cards: list[Card], elapsed_s: float) -> Play | None:
+        """Last seconds of overtime: any tower damage can decide the game."""
+        if self._phase not in _OVERTIME or elapsed_s < OT_TIEBREAK_CHIP_S:
+            return None
+        spells = [c for c in cards if c[2] == ROLE_SPELL and _base_card_id(c[1]) in SPELL_TOWER_FRACTION]
+        alive = [(hp, lane) for lane in ("left", "right") if (hp := self.enemy_tower_hp(lane)) is not None and hp > 0]
+        if not spells or not alive:
+            return None
+        lane = min(alive)[1]
+        card = max(spells, key=lambda c: SPELL_TOWER_FRACTION[_base_card_id(c[1])])
+        coord = ENEMY_PRINCESS_TOWER_CENTERS[lane]
+        return Play(card[0], card[1], card[2], coord, lane, False, f"tiebreak chip on the {lane} tower")
+
+    def _offense_tiers(self, mode: str) -> list[Callable[[Card], bool]]:
+        """Card filters in play order for this offense mode."""
+
+        def win(c: Card) -> bool:
+            return self._role(c[1]) == ROLE_WIN
+
+        def tank(c: Card) -> bool:
+            return self._role(c[1]) != ROLE_WIN and ck.has_role(c[1], ck.WIN2, ck.TANK)
+
+        def support(c: Card) -> bool:
+            return self._role(c[1]) == ROLE_SUPPORT and not ck.has_role(c[1], ck.CY)
+
+        def cycle(c: Card) -> bool:
+            return _known(c[1]) and self._role(c[1]) in (ROLE_TROOP, ROLE_SUPPORT) and ck.has_role(c[1], ck.CY)
+
+        def troop(c: Card) -> bool:
+            return _known(c[1]) and self._role(c[1]) == ROLE_TROOP and not tank(c) and not cycle(c)
+
+        def unknown(c: Card) -> bool:
+            return not _known(c[1])
+
+        if mode == "follow":
+            # Back the push up instead of stacking a second win condition on it.
+            return [troop, support, cycle, unknown, tank, win]
+        if mode == "counter":
+            return [win, tank, troop, support, cycle, unknown]
+        return [win, tank, support, cycle, troop, unknown]
+
+    def _offense(
+        self,
+        cards: list[Card],
+        lane: str,
+        mode: str,
+        elapsed_s: float,
+        elixir: int | None,
+        elixir_full: bool,
+        pushes: Mapping[str, EnemyPush],
+    ) -> Play | None:
+        finish = self._finishing_spell(cards)
+        if finish is not None:
+            return finish
+        spells_blocked = bool(pushes) or bool(self._remembered(SPELL_BLOCK_MEMORY_S))
+        if not spells_blocked:
+            chip = self._tiebreak_chip(cards, elapsed_s)
+            if chip is not None:
+                return chip
+        if mode == "normal":
+            for special in (
+                self._back_tank(cards, lane, elixir, elixir_full),
+                self._spawner(cards, lane, elixir, pushes),
+                self._cycle(cards, lane, elixir) if elixir is not None and not elixir_full else None,
+            ):
+                if special is not None:
+                    return special
+
+        reason = {
+            "pressure": f"pressuring the {lane} lane",
+            "follow": f"backing up the push in the {lane} lane",
+            "counter": f"counter-pushing in the {lane} lane",
+        }.get(mode, f"pushing the {lane} lane")
+        hold = mode == "follow" and self._back_tank_hold()
+        for tier in self._offense_tiers(mode):
+            options = [
+                c
+                for c in cards
+                if c[2] not in (ROLE_SPELL, ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL)
+                and tier(c)
+                and self._affordable_on_offense(c, elixir, elixir_full, mode)
+            ]
+            if elixir is not None and not elixir_full:
+                # Back tanks wait for the full-elixir push (see _back_tank), never a naked bridge drop.
+                options = [c for c in options if not self._is_back_tank(c[1])]
+            if hold:
+                options = [c for c in options if self._role(c[1]) in (ROLE_WIN, ROLE_SUPPORT)]
+            if not options:
+                continue
+            index, card_id, _ = self._pick(options)
+            role = self._role(card_id)
+            coord = self._offense_coord(card_id, role, lane, mode, elapsed_s)
+            if coord is None:
+                continue
+            return Play(index, card_id, role, coord, lane, False, reason)
+
+        if elixir_full:
+            return self._leak(cards, lane, elapsed_s, spells_blocked)
+        return None
+
+    def _offense_coord(self, card_id: str, role: str, lane: str, mode: str, elapsed_s: float) -> tuple[int, int] | None:
+        if mode in ("follow", "counter") and role != ROLE_WIN:
+            behind = self._behind_push(lane) if (mode == "counter" or self._back_tank_drop) else None
+            if behind is not None:
+                return behind
+        if not _known(card_id) or (role != ROLE_WIN and ck.has_role(card_id, ck.CY)):
+            return OPENING_BACK_COORDS[lane]
+        return self._offense_drop(card_id, role, lane, elapsed_s)
+
+    def _leak(self, cards: list[Card], lane: str, elapsed_s: float, spells_blocked: bool) -> Play | None:
+        """About to leak at 10: building, then utility / own-side spell, a spell only as a last resort."""
+        hand_ids = [c[1] for c in cards]
+        for role in (ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL, ROLE_SPELL):
+            options = [c for c in cards if c[2] == role]
+            target = lane
+            if role == ROLE_SPELL:
+                if spells_blocked:
+                    continue
+                options = [c for c in options if not self._last_swarm_answer(c[1], hand_ids)]
+                if self.enemy_tower_hp(lane) == 0:
+                    target = _other(lane)  # never throw a spell at a destroyed tower
+                    if self.enemy_tower_hp(target) == 0:
+                        continue
+            if not options:
+                continue
+            index, card_id, picked = self._pick(options)
+            coord = self._offense_drop(card_id, picked, target, elapsed_s)
+            if coord is not None:
+                return Play(index, card_id, picked, coord, target, False, "spending elixir before it leaks")
+        return None
+
+    def _affordable_on_offense(self, card: Card, elixir: int | None, elixir_full: bool, mode: str = "normal") -> bool:
         """Elixir discipline: offense keeps a defense reserve unless backed by a reason."""
         if elixir is None or elixir_full:
             return True
         if card[2] in (ROLE_SPELL, ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL):
-            return True  # gated by the priority lists already
-        counter_pushing = self._counter_push_lane is not None and self._clock() < self._counter_push_until
-        if card[2] == ROLE_WIN:
-            return counter_pushing or elixir - card_cost(card[1]) >= self.reserve()
-        # Support/troops: only to back up a push, counter-push, or avoid a leak.
-        if self._following_up() or counter_pushing:
-            return elixir - card_cost(card[1]) >= 1  # committing to a live push is worth it
-        return elixir >= NEAR_LEAK_ELIXIR
+            return True  # gated by their own rules (finishing / spawner / leak)
+        cost = card_cost(card[1])
+        if self._role(card[1]) == ROLE_WIN:
+            return (mode == "counter" and elixir - cost >= 1) or elixir - cost >= self.reserve()
+        if mode == "follow":
+            return elixir - cost >= max(1, self.reserve() - 1)  # committing to a live push is worth it
+        if mode == "counter":
+            return elixir - cost >= 1 and self._counter_push_spent + cost <= COUNTER_PUSH_SPEND_CAP
+        return elixir >= NEAR_LEAK_BY_PHASE[self._phase]
 
-    def _back_tank(
-        self, cards: list[tuple[int, str, str]], lane: str, elixir: int | None, elixir_full: bool
-    ) -> Play | None:
-        tanks = [c for c in cards if _is(c[1], BACK_TANKS)]
+    def _back_tank(self, cards: list[Card], lane: str, elixir: int | None, elixir_full: bool) -> Play | None:
+        tanks = [c for c in cards if self._is_back_tank(c[1])]
         if not tanks or elixir is None:
             return None
         if self.opponent.style() == ARCHETYPE_PRESSURE and not elixir_full:
             return None  # a slow push at the back gets punished by bridge spam in the other lane
-        if not elixir_full and elixir < max(BACK_TANK_MIN_ELIXIR, *(card_cost(c[1]) for c in tanks)):
+        threshold = BACK_TANK_MIN_BY_PHASE[self._phase]
+        if not elixir_full and elixir < max(threshold, *(card_cost(c[1]) for c in tanks)):
             return None
-        index, card_id, picked = self._pick(tanks)
+        index, card_id, _ = self._pick(tanks)
         return Play(
             index,
             card_id,
-            picked,
+            self._role(card_id),
             BACK_TANK_COORDS[lane],
             lane,
             False,
             f"starting a push at the back in the {lane} lane",
         )
 
-    def _cycle(self, cards: list[tuple[int, str, str]], lane: str, elixir: int) -> Play | None:
+    def _spawner(
+        self, cards: list[Card], lane: str, elixir: int | None, pushes: Mapping[str, EnemyPush]
+    ) -> Play | None:
+        """Empty board, plenty of elixir and no win card to start a push: a spawner builds value."""
+        if elixir is None or elixir < CYCLE_MIN_ELIXIR or pushes:
+            return None
+        if any(self._role(c[1]) == ROLE_WIN or self._is_back_tank(c[1]) for c in cards):
+            return None
+        spawners = [c for c in cards if _is(c[1], SPAWNER_BUILDINGS)]
+        if not spawners:
+            return None
+        index, card_id, picked = self._pick(spawners)
+        return Play(
+            index, card_id, picked, DEFENSE_BUILDING_PULL_COORDS[lane], lane, False, "placing a spawner for value"
+        )
+
+    def _cycle(self, cards: list[Card], lane: str, elixir: int) -> Play | None:
         """No win condition in hand: spend a cheap card at the back to bring one around."""
-        if elixir < CYCLE_MIN_ELIXIR or any(c[2] == ROLE_WIN for c in cards):
+        if elixir < CYCLE_MIN_BY_PHASE[self._phase] or any(self._role(c[1]) == ROLE_WIN for c in cards):
             return None
         hand = [c[1] for c in cards]
         waits = [(n, w) for w in self.deck.win_conditions() if (n := self.deck.plays_until(w, hand))]
         if not waits:
             return None
-        cheap = [c for c in cards if c[2] in (ROLE_TROOP, ROLE_SUPPORT) and card_cost(c[1]) <= _CYCLE_MAX_COST]
+        cheap = [
+            c
+            for c in cards
+            if _known(c[1]) and c[2] in (ROLE_TROOP, ROLE_SUPPORT) and card_cost(c[1]) <= _CYCLE_MAX_COST
+        ]
         if not cheap:
             return None
         plays_away, win = min(waits)
@@ -909,9 +1515,6 @@ class BattleBrain:
             index, card_id, picked, OPENING_BACK_COORDS[lane], lane, False,
             f"cycling toward {win} ({plays_away} play{'s' if plays_away > 1 else ''} away)",
         )  # fmt: skip
-
-    def _following_up(self) -> bool:
-        return self._last_win is not None and self._clock() - self._last_win[1] < self._last_win[2]
 
     def _is_opening(self, elapsed_s: float) -> bool:
         return not self._played_any and elapsed_s < OPENING_WINDOW_S
@@ -923,7 +1526,7 @@ class BattleBrain:
             # Drop at the bridge on our side so its troops walk into the lane.
             return (DEFENSE_BUILDING_PULL_COORDS[lane][0] - (60 if lane == "left" else -60), OWN_HALF_DROP_Y_RANGE[0])
         coord = calculate_play_coords(get_card_group(card_id), lane, elapsed_s)
-        return tuple(coord) if coord is not None else None
+        return (int(coord[0]), int(coord[1])) if coord is not None else None
 
     def _describe(self, elixir: int | None, pushes: Mapping[str, EnemyPush]) -> str:
         """One-line read of the game right now, for the status bar."""
@@ -941,18 +1544,36 @@ class BattleBrain:
             parts.append(f"seen {len(self.opponent.deck.cards)}/8 of their cards")
         return " · ".join(parts)
 
-    def record(self, play: Play) -> None:
-        """Remember a play we made (call after the clicks went through)."""
+    def record(self, play: Play, deployed: bool = True) -> None:
+        """Remember a play we made (call after the clicks went through).
+
+        ``deployed=False`` (tapped, but the card never went down) only logs the attempt for
+        the deck tracker: no cooldown, rotation or recent-slot change.
+        """
+        self.deck.played(play.card_id, play.index, deployed)
+        if not deployed:
+            return
         self._played_any = True
         self.recent = [*self.recent[-2:], play.index]
-        self.deck.played(play.card_id)
         now = self._clock()
         if play.reason.startswith("stunning"):
             self._last_stun = now
         if play.defensive:
-            self._last_defense[play.lane] = (now, play.coord[1])
+            threat_y = play.threat_y if play.threat_y is not None else play.coord[1]
+            self._last_defense[play.lane] = (now, threat_y)
+            push = self._pushes.get(play.lane)
+            self._commits[play.lane] = _DefenseCommit(
+                now, threat_y, push.count if push else 1, self.own_tower_hp(play.lane), set()
+            )
             self._counter_push_lane = play.lane
             self._counter_push_until = now + COUNTER_PUSH_WINDOW_S
+            self._counter_push_spent = 0
+            return
+        if self._counter_window_open() and play.role != ROLE_WIN:
+            self._counter_push_spent += card_cost(play.card_id)
+        if play.coord == BACK_TANK_COORDS[play.lane] and (play.role == ROLE_WIN or self._is_back_tank(play.card_id)):
+            self._last_win = (play.lane, now, BACK_TANK_FOLLOW_UP_S)
+            self._back_tank_drop = (play.lane, now)
         elif play.role == ROLE_WIN:
-            window = BACK_TANK_FOLLOW_UP_S if play.coord == BACK_TANK_COORDS[play.lane] else SUPPORT_FOLLOW_UP_S
-            self._last_win = (play.lane, now, window)
+            self._last_win = (play.lane, now, SUPPORT_FOLLOW_UP_S)
+            self._back_tank_drop = None

@@ -75,3 +75,61 @@ def test_discover_devices_raises_on_timeout(monkeypatch):
 
     with pytest.raises(EmulatorNotReadyError, match="adb devices"):
         AdbBasedController.discover_devices()
+
+
+def _capture_all(monkeypatch):
+    calls: list[list[str]] = []
+
+    def spy(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(adb_base, "run_command", spy)
+    return calls
+
+
+def test_tap_sequence_is_one_adb_call_with_taps_in_order(monkeypatch):
+    calls = _capture_all(monkeypatch)
+    ctrl = _make_controller()
+    ctrl.tap_sequence([(10, 20), (300, 400)])
+
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[:3] == ["adb", "-s", "127.0.0.1:5555"]
+    # One remote-shell string; adb hands it to the device shell, which runs both in order.
+    assert argv[3:] == ["shell", "input tap 10 20; input tap 300 400"]
+
+
+def test_tap_sequence_empty_sends_nothing(monkeypatch):
+    calls = _capture_all(monkeypatch)
+    ctrl = _make_controller()
+    ctrl.tap_sequence([])
+    assert calls == []
+    assert ctrl.last_input_time == 0.0
+
+
+def test_click_and_tap_sequence_update_last_input_time(monkeypatch):
+    _capture_all(monkeypatch)
+    ticks = iter([5.0, 7.5])
+    monkeypatch.setattr(adb_base.time, "monotonic", lambda: next(ticks))
+    ctrl = _make_controller()
+    assert ctrl.last_input_time == 0.0
+
+    ctrl.click(1, 2)
+    assert ctrl.last_input_time == 5.0
+    ctrl.tap_sequence([(3, 4), (5, 6)])
+    assert ctrl.last_input_time == 7.5
+
+
+def test_raw_screencap_command_argv(monkeypatch):
+    seen = _capture(monkeypatch)
+    _make_controller().adb("exec-out screencap", binary_output=True)
+    assert seen["argv"][-2:] == ["exec-out", "screencap"]
+
+
+def test_frame_stream_command_is_single_remote_string():
+    from pyclashbot.emulators.adb_base import FrameStream
+
+    # adb joins exec-out args with spaces for the device shell, so the loop must be
+    # one argv element to keep its quoting intact.
+    assert FrameStream.STREAM_COMMAND == "sh -c 'while true; do screencap; done'"

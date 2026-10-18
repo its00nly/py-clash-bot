@@ -200,3 +200,8 @@ BACK_TANK_COORDS = {"left": (150, 458), "right": (268, 458)}
 # Box around an EnemyUnit point (offsets L, T, R, B) cropped for unit-type recognition:
 # the point sits just under the level badge, the body hangs below it.
 ENEMY_UNIT_CROP_OFFSETS_LTRB = (-36, -28, 36, 44)
+# Enemy princess-tower centres, for finishing spells (UNCONFIRMED: estimated from the battle
+# fixture's grass grid at ~17 px/tile across, ~13.8 px/tile down; check on a live frame).
+ENEMY_PRINCESS_TOWER_CENTERS = {"left": (115, 138), "right": (303, 138)}
+# x of our side of each bridge: follow-ups walk up the lane behind a tank from here.
+LANE_BRIDGE_X = {"left": 117, "right": 300}

@@ -22,7 +22,11 @@ from pyclashbot.detection.image_rec import (
 
 
 def check_if_in_battle(emulator):
-    iar_bgr = emulator.screenshot()
+    return in_battle_from_frame(emulator.screenshot())
+
+
+def in_battle_from_frame(iar_bgr) -> bool:
+    """True when a BGR frame shows the in-battle HUD (1v1 or 2v2 scoreboard)."""
     if iar_bgr is None:
         return False
 
@@ -48,6 +52,13 @@ def check_if_in_battle(emulator):
         r, g, b = pixel
         return r >= 170 and g >= 130 and b <= 140
 
+    def is_dim_emote(pixel: list[int] | None) -> bool:
+        """Darker emote-button purple seen in live 1v1 frames (tests/fixtures/card_hand_bgr_regression.png)."""
+        if pixel is None:
+            return False
+        r, g, b = pixel
+        return 85 <= r <= 125 and 35 <= g <= 70 and 80 <= b <= 120
+
     def is_scoreboard_purple(pixel: list[int] | None) -> bool:
         if pixel is None:
             return False
@@ -60,7 +71,10 @@ def check_if_in_battle(emulator):
         # small rendering differences) while still requiring the purple scoreboard.
         bright_required = max(1, len(coords) - 2)
         bright_count = sum(1 for pixel in pixels[:-1] if is_bright(pixel) or is_filled_crown(pixel))
-        return bright_count >= bright_required and is_scoreboard_purple(pixels[-1])
+        if bright_count >= bright_required and is_scoreboard_purple(pixels[-1]):
+            return True
+        # Fallback palette: every emote pixel the dim purple, plus the scoreboard purple.
+        return all(is_dim_emote(pixel) for pixel in pixels[:-1]) and is_scoreboard_purple(pixels[-1])
 
     # When the emote is closed these pixels are not considered bright:
     # (533, 80) RGB=[157, 44, 44] and (532, 77) RGB=[187, 55, 55]
@@ -72,6 +86,26 @@ def check_if_in_battle(emulator):
     if check_mode(coords_2v2):
         return True
 
+    return False
+
+
+# Hero/Champion ability button: any of these pixels (y, x) close to any of the colors (BGR)
+# means the ability is charged. Same pixels as card_detection.is_hero_champion_ability_visible.
+HERO_ABILITY_PIXELS = ((462, 324), (453, 334), (462, 336))
+HERO_ABILITY_COLORS = numpy.array([[215, 28, 223], [240, 39, 254], [239, 40, 251]])
+HERO_ABILITY_TOLERANCE = 30
+
+
+def hero_ability_ready(iar) -> bool:
+    """True when the Hero/Champion ability button is lit in a BGR battle frame."""
+    if iar is None:
+        return False
+    for y, x in HERO_ABILITY_PIXELS:
+        if y >= iar.shape[0] or x >= iar.shape[1]:
+            continue
+        pixel = numpy.asarray(iar[y][x][:3], dtype=numpy.int32)
+        if numpy.any(numpy.all(numpy.abs(HERO_ABILITY_COLORS - pixel) <= HERO_ABILITY_TOLERANCE, axis=1)):
+            return True
     return False
 
 

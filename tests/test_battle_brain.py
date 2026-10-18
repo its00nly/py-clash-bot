@@ -175,6 +175,25 @@ def test_defense_cooldown_and_deeper_push():
     assert brain.should_defend_now([threat]) is threat
 
 
+def test_push_growth_needs_two_separate_frames_to_unlock():
+    clock = _Clock()
+    brain = _brain(clock)
+    threat = EnemyUnit(103, 300, 40)
+    play = brain.choose(FIXTURE_HAND, [threat], elapsed_s=30)
+    assert play is not None and play.defensive
+    brain.record(play)
+    grown = [threat, EnemyUnit(110, 290, 40)]
+
+    # observe() and choose() both ask on the same frame: one noisy read must not unlock.
+    clock.now += 0.5
+    assert brain.should_defend_now(grown) is None
+    clock.now += 0.01  # same frame, a few ms later
+    assert brain.should_defend_now(grown) is None
+    # A second read on a later frame confirms the growth.
+    clock.now += 0.2
+    assert brain.should_defend_now(grown) is not None
+
+
 def test_counter_push_follows_the_defended_lane():
     clock = _Clock()
     brain = _brain(clock)
@@ -320,17 +339,17 @@ def test_backs_up_a_win_condition_instead_of_stacking():
     assert "backing up" in play.reason
 
 
-def test_spells_saved_unless_they_finish_a_tower_or_overtime():
+def test_spells_saved_unless_they_finish_a_tower():
     hand = {0: "fireball"}
     assert _brain().choose(hand, [], elapsed_s=60) is None
-    assert _brain().choose(hand, [], elapsed_s=160) is not None
+    assert _brain().choose(hand, [], elapsed_s=160) is None  # no time-based chip any more
 
     brain = _brain()
     brain.attack_lane = "left"
     for _ in range(3):
-        brain.observe_towers(_health(enemy_left=0.2, enemy_right=0.2))
+        brain.observe_towers(_health(enemy_left=0.1, enemy_right=0.2))
     play = brain.choose(hand, [], elapsed_s=60)
-    assert play is not None and "finishing" in play.reason
+    assert play is not None and "finishing" in play.reason and play.lane == "left"
 
 
 # ---- round 3: elixir discipline, swarms, stuns, rotation, opponent pattern ----------
@@ -351,15 +370,26 @@ def test_reads_elixir_on_the_fixture(frame):
     assert read_elixir(frame) == 5
 
 
-def _swarm(lane_x=110, y=320):
-    return [EnemyUnit(lane_x, y, 20), EnemyUnit(lane_x + 15, y + 5, 20), EnemyUnit(lane_x - 12, y + 10, 20)]
+def _swarm(lane_x=110, y=320, n=4):
+    offsets = ((0, 0), (15, 5), (-12, 10), (5, 18))
+    return [EnemyUnit(lane_x + dx, y + dy, 20) for dx, dy in offsets[:n]]
 
 
-def test_swarm_gets_the_cheap_spell_the_moment_it_crosses():
+def test_swarm_gets_a_spell_the_moment_it_crosses():
     hand = {0: "knight", 1: "log", 2: "fireball", 3: "musketeer"}
     play = _brain().choose(hand, _swarm(), elapsed_s=40, elixir=6)
-    assert play is not None and play.card_id == "log" and play.defensive
+    # 4+ bunched markers: the big area spell, not the Log that leaves half of it standing.
+    assert play is not None and play.card_id == "fireball" and play.defensive
     assert "swarm" in play.reason
+    # No big spell: an anti-air troop beats a small spell (the swarm might be Minions)...
+    play = _brain().choose({0: "knight", 1: "log", 3: "musketeer"}, _swarm(), elapsed_s=40, elixir=6)
+    assert play is not None and play.card_id == "musketeer"
+    # ...and with none, the small spell.
+    play = _brain().choose({0: "knight", 1: "log"}, _swarm(), elapsed_s=40, elixir=6)
+    assert play is not None and play.card_id == "log"
+    # 3 unrecognized markers are often a tank + support, not a swarm: a troop answers.
+    play = _brain().choose(hand, _swarm(n=3), elapsed_s=40, elixir=6)
+    assert play is not None and play.card_id not in {"log", "fireball"}
 
 
 def test_push_our_troops_already_fight_is_left_alone():
@@ -422,7 +452,8 @@ def test_golem_starts_at_the_back_with_full_elixir_then_gets_support():
     assert play.coord == BACK_TANK_COORDS[play.lane]
     brain.record(play)
     clock.now += 6
-    follow = brain.choose({1: "night_witch", 2: "zap", 3: "lumberjack"}, [], elapsed_s=66, elixir=5)
+    # The follow-up keeps max(1, reserve - 1) elixir back.
+    follow = brain.choose({1: "night_witch", 2: "zap", 3: "lumberjack"}, [], elapsed_s=66, elixir=6)
     assert follow is not None and follow.card_id in {"night_witch", "lumberjack"} and "backing up" in follow.reason
 
 

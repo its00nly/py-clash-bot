@@ -1,22 +1,27 @@
 """random module for randomizing fight plays"""
 
 import collections
+import inspect
+import json
+import os
 import random
 import time
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
-from pyclashbot.bot import card_detection
-from pyclashbot.bot.battle_brain import BattleBrain
+import numpy
+
+from pyclashbot.bot import card_detection, state_detect
+from pyclashbot.bot.battle_brain import BattleBrain, card_cost
 from pyclashbot.bot.card_detection import (
     check_which_cards_are_available,
     create_default_bridge_iar,
     get_play_coords_for_card,
     identify_hand_cards,
-    is_hero_champion_ability_visible,
     switch_side,
-    trigger_hero_champion_ability,
 )
 from pyclashbot.bot.coords import (
+    CHAMPION_ABILITY_DISMISS_COORD,
     CLOSE_BATTLE_LOG_BUTTON,
     EMOTE_BUTTON_COORD,
     EMOTE_ICON_COORDS,
@@ -25,9 +30,8 @@ from pyclashbot.bot.coords import (
     QUICKMATCH_POPUP_BUTTON_COORD,
     START_FIGHT_BUTTON_COORD,
 )
-from pyclashbot.bot.find import find_enemy_units, find_friendly_units, read_tower_health
+from pyclashbot.bot.find import EnemyUnit, find_enemy_units, find_friendly_units, read_tower_health
 from pyclashbot.bot.nav import (
-    check_for_in_battle_with_delay,
     get_to_activity_log,
     get_to_main_after_fight,
     select_mode,
@@ -45,20 +49,55 @@ from pyclashbot.bot.recorder import (
 from pyclashbot.bot.state_detect import (
     check_if_battle_has_ended,
     check_if_battle_mode_is_selected,
-    check_if_in_battle,
     check_if_on_clash_main_menu,
     check_pixels_for_win_in_battle_log,
-    count_elixir,
+    in_battle_from_frame,
     read_elixir,
 )
 from pyclashbot.bot.unit_classifier import classify_units
 from pyclashbot.utils.logger import Logger
+from pyclashbot.utils.platform import get_log_dir
 from pyclashbot.utils.versioning import __version__
 
 # Smart battles wait only for the cheapest useful card; the brain decides the rest.
 SMART_MIN_ELIXIR = 2
 ELIXIR_WAIT_TIMEOUT = 40  # too high but someone got errors with that so idk
-ABILITY_TRIGGER_DELAY_S = 3
+
+# Hero/Champion ability: fire once the button has been lit for ABILITY_READY_S across at least
+# ABILITY_MIN_FRAMES consecutive frames and an enemy is on our half (smart mode), or after
+# ABILITY_FALLBACK_S regardless. One unlit frame doesn't reset the timer; two in a row do.
+ABILITY_READY_S = 1.0
+ABILITY_MIN_FRAMES = 2
+ABILITY_FALLBACK_S = 4.0
+ABILITY_COOLDOWN_S = 5.0
+ABILITY_MISSES_TO_RESET = 2
+
+# Battle end: only after this long with no in-battle frame, then confirmed by check_if_battle_has_ended.
+BATTLE_END_DEBOUNCE_S = 3.0
+# Give up confirming and end the fight anyway after this long without an in-battle frame.
+BATTLE_LOST_GIVE_UP_S = 15.0
+LOST_FRAME_SLEEP_S = 0.25
+
+# After a card play: decide again only on a frame captured this long after the taps returned.
+PLAY_SETTLE_S = 0.3
+# Smart loop: drop back to the elixir-wait preamble at least this often while holding.
+PREAMBLE_BACKSTOP_S = 5.0
+# A threat this deep is answered with whatever elixir we have.
+DEEP_THREAT_Y = 375
+# Mean absolute pixel change over a hand slot that counts as "a different card is there now".
+SLOT_CHANGE_THRESHOLD = 18.0
+# A card that failed to deploy stays raised in its slot; compare up to this many pixels higher.
+SLOT_RAISE_MAX_DY = 12
+# After a play that did not deploy, leave that slot alone this long before trying it again.
+NOT_DEPLOYED_BACKOFF_S = 1.0
+# Repeated hold / no-cards status lines and decision-log lines: at most this often unless they change.
+REPEAT_STATUS_S = 1.0
+DECISION_LOG_MIN_GAP_S = 1.0
+# Decision logs kept on disk (oldest pruned when a new fight starts).
+DECISION_LOG_KEEP = 30
+
+# Per-decision JSONL logs go here (None = <log dir>/decisions); tests point it at a tmp dir.
+DECISION_LOG_DIR: str | None = None
 
 
 def _maybe_start_fight_recording(
@@ -68,6 +107,25 @@ def _maybe_start_fight_recording(
     if recording_flag and fight_mode_chosen in ["Classic 1v1", "Trophy Road"]:
         pack_mode = "1v1_trophy" if fight_mode_chosen == "Trophy Road" else "1v1_classic"
         start_fight_recording(emulator, pack_mode, __version__, logger=logger, custom_path=custom_path)
+
+
+_hand_crop_setting: tuple[bool, str | None] | None = None
+
+
+def _configure_hand_crops(recording_flag: bool, custom_path: str | None = None) -> None:
+    """Unreadable hand-card crops are only kept when the user records fights (into their recordings folder)."""
+    global _hand_crop_setting
+    setting = (bool(recording_flag), custom_path)
+    if setting == _hand_crop_setting:
+        return
+    try:
+        from pyclashbot.bot import hand_crop_sink  # lazy: keeps recorder deps out of import
+
+        root = hand_crop_sink.default_root(custom_path) if recording_flag else None
+        hand_crop_sink.configure(root, enabled=bool(recording_flag))
+        _hand_crop_setting = setting
+    except Exception:  # crop capture must never break a battle
+        pass
 
 
 def do_fight_state(
@@ -198,19 +256,456 @@ def send_emote(emulator, logger: Logger):
     emulator.click(emote_coord[0], emote_coord[1])
 
 
+# ===== One frame per tick ===============================================
+
+
+@dataclass
+class TickFrame:
+    """Everything the fight loop reads from one screenshot."""
+
+    iar: Any
+    captured_at: float  # time.monotonic() when the capture started
+    in_battle: bool
+    elixir: int | None
+    available: list[int]
+    enemies: list[EnemyUnit] = field(default_factory=list)
+    friends: list[EnemyUnit] = field(default_factory=list)
+    threat: EnemyUnit | None = None
+
+
+def _hero_ability_ready(iar) -> bool:
+    """card_detection's frame predicate when it exists, else the local copy in state_detect."""
+    shared = getattr(card_detection, "hero_ability_ready", None)
+    if callable(shared):
+        return bool(shared(iar))
+    return state_detect.hero_ability_ready(iar)
+
+
+def _available_slots(iar) -> list[int]:
+    """Affordable hand slots in ``iar`` without taking another screenshot."""
+    if iar is None:
+        return []
+    shared = getattr(card_detection, "cards_available", None)
+    if callable(shared):
+        return list(shared(iar))
+    slots = []
+    for i, (x_coords, y_coords) in enumerate(card_detection.card_coords):
+        pixels = iar[numpy.ix_(y_coords, x_coords)].astype(numpy.int32)
+        purple = numpy.all(numpy.abs(pixels - card_detection.purple_color) <= 30, axis=-1)
+        if int(numpy.sum(purple)) >= 26:
+            slots.append(i)
+    return slots
+
+
+def capture_frame(emulator) -> TickFrame:
+    """Take exactly one screenshot and read battle state, elixir and hand availability from it."""
+    captured_at = time.monotonic()
+    iar = emulator.screenshot()
+    card_detection.battle_iar = iar
+    in_battle = in_battle_from_frame(iar)
+    elixir = read_elixir(iar) if iar is not None else None
+    available = _available_slots(iar) if in_battle else []
+    return TickFrame(iar, captured_at, in_battle, elixir, available)
+
+
+def _update_play_side() -> None:
+    """Refresh card_detection.play_side from the current battle_iar (no screenshot)."""
+    if card_detection.battle_iar is None or card_detection.bridge_iar is None:
+        return
+    try:
+        _, card_detection.play_side = switch_side()
+    except Exception:  # side detection is a nicety; never let it break a fight
+        pass
+
+
+def _tap_card(emulator, hand_xy, drop_xy) -> None:
+    """Both taps of a card play, back to back (one ADB call when the emulator supports it)."""
+    hand = (int(hand_xy[0]), int(hand_xy[1]))
+    drop = (int(drop_xy[0]), int(drop_xy[1]))
+    tap_sequence = getattr(emulator, "tap_sequence", None)
+    if callable(tap_sequence):
+        tap_sequence([hand, drop])
+    else:
+        emulator.click(*hand)
+        emulator.click(*drop)
+
+
+def _accepts(fn, name: str) -> bool:
+    """True when callable ``fn`` takes a parameter called ``name``."""
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _brain_choose(
+    brain,
+    hand: dict[int, str],
+    threats: list[EnemyUnit],
+    elapsed: float,
+    elixir: int | None,
+    friends: list[EnemyUnit],
+    clock: float | None,
+    full_hand: dict[int, str] | None,
+    affordable: set[int] | None = None,
+):
+    """brain.choose with the extras its signature supports (clock, full hand, affordable set)."""
+    kwargs: dict[str, Any] = {"elixir": elixir, "friends": friends}
+    if clock is not None and _accepts(brain.choose, "clock"):
+        kwargs["clock"] = clock
+    if full_hand is not None and _accepts(brain.choose, "full_hand"):
+        kwargs["full_hand"] = full_hand
+    if full_hand is not None and _accepts(brain.choose, "affordable"):
+        kwargs["affordable"] = set(hand) if affordable is None else affordable
+    return brain.choose(hand, threats, elapsed, **kwargs)
+
+
+def _brain_record(brain, play, deployed: bool) -> None:
+    """brain.record(play, deployed=...) when supported; otherwise only real deploys are recorded."""
+    if _accepts(brain.record, "deployed"):
+        brain.record(play, deployed=deployed)
+    elif deployed:
+        brain.record(play)
+
+
+def _identify_hand(emulator, iar, available: list[int]) -> tuple[dict[int, str], dict[int, str] | None]:
+    """(playable hand, full 4-slot hand or None). Uses identify_hand_cards_scored when present."""
+    scored = getattr(card_detection, "identify_hand_cards_scored", None)
+    if callable(scored):
+        try:
+            full = {int(entry[0]): str(entry[1]) for entry in scored(iar, slots=(0, 1, 2, 3))}
+            return {i: full[i] for i in available if i in full}, full
+        except Exception:
+            pass  # fall back to the per-slot matcher
+    return {index: identify_hand_cards(emulator, index) for index in available}, None
+
+
+def _slot_fingerprint(iar, slot: int, dy: int = 0):
+    """Coarse 6x6 colour grid of a hand slot (``dy`` px lower), for 'did a different card arrive' checks."""
+    if iar is None:
+        return None
+    x, y = card_detection.toplefts[slot]
+    y = max(0, y + dy)
+    crop = iar[y : y + card_detection.TOTAL_HEIGHT, x : x + card_detection.TOTAL_WIDTH]
+    if crop.size == 0 or crop.shape[0] != card_detection.TOTAL_HEIGHT:
+        return None
+    rows = numpy.array_split(crop.astype(numpy.float32), 6, axis=0)
+    return numpy.array([[cell.mean(axis=(0, 1)) for cell in numpy.array_split(row, 6, axis=1)] for row in rows])
+
+
+def _slot_changed(iar, slot: int, before) -> bool:
+    """True when ``slot`` no longer shows the card in ``before`` (a merely raised card is the same card)."""
+    if before is None:
+        return False
+    diffs = []
+    for dy in range(-SLOT_RAISE_MAX_DY, 1):
+        after = _slot_fingerprint(iar, slot, dy)
+        if after is not None and after.shape == before.shape:
+            diffs.append(float(numpy.mean(numpy.abs(after - before))))
+    return bool(diffs) and min(diffs) >= SLOT_CHANGE_THRESHOLD
+
+
+def _is_unknown(card_id: str | None) -> bool:
+    return card_id is None or card_id.upper().startswith("UNKNOWN")
+
+
+class AbilityTrigger:
+    """Fires the Hero/Champion ability. Lives for the whole fight so 'ready since' survives ticks."""
+
+    def __init__(self) -> None:
+        self.ready_since: float | None = None
+        self.hits = 0  # consecutive lit frames
+        self.misses = 0  # consecutive unlit frames
+        self.last_fired = -1e9
+        self.fired = 0
+
+    def tick(self, emulator, logger, iar, now: float, enemy_on_our_half: bool | None) -> bool:
+        """Feed one frame; tap the ability if due. ``enemy_on_our_half`` None = don't gate on enemies.
+
+        Call between card plays only (never between the two taps of a play).
+        """
+        if not _hero_ability_ready(iar):
+            self.hits = 0
+            self.misses += 1
+            if self.misses >= ABILITY_MISSES_TO_RESET:
+                self.ready_since = None
+            return False
+        self.misses = 0
+        self.hits += 1
+        if self.ready_since is None:
+            self.ready_since = now
+            logger.change_status("Hero/Champion ability ready")
+        if now - self.last_fired < ABILITY_COOLDOWN_S:
+            return False
+        held = now - self.ready_since
+        if self.hits < ABILITY_MIN_FRAMES or held < ABILITY_READY_S:
+            return False
+        if enemy_on_our_half is False and held < ABILITY_FALLBACK_S:
+            return False
+        emulator.click(*CHAMPION_ABILITY_DISMISS_COORD)
+        logger.change_status("Triggered Hero/Champion ability")
+        self.last_fired = now
+        self.ready_since = None
+        self.hits = 0
+        self.fired += 1
+        return True
+
+
+@dataclass
+class PendingPlay:
+    play: Any
+    slot: int
+    card_id: str
+    elixir_before: int | None
+    fingerprint: Any
+    tap_done_at: float
+    raw_card_id: str | None = None  # the hand read before the brain resolved an UNKNOWN slot
+
+
+class DecisionLog:
+    """Per-decision JSONL lines for replaying fights through BattleBrain offline. Never raises."""
+
+    def __init__(self, directory: str | None = None) -> None:
+        self.path: str | None = None
+        try:
+            directory = directory or DECISION_LOG_DIR or os.path.join(get_log_dir("py-clash-bot"), "decisions")
+            os.makedirs(directory, exist_ok=True)
+            self._prune(directory)
+            self.path = os.path.join(directory, time.strftime("%Y-%m-%d_%H-%M-%S") + ".jsonl")
+        except OSError:
+            self.path = None
+
+    @staticmethod
+    def _prune(directory: str) -> None:
+        """Keep only the newest DECISION_LOG_KEEP - 1 logs, making room for this fight's."""
+        logs = sorted(name for name in os.listdir(directory) if name.endswith(".jsonl"))
+        for name in logs[: max(0, len(logs) - (DECISION_LOG_KEEP - 1))]:
+            try:
+                os.remove(os.path.join(directory, name))
+            except OSError:
+                pass
+
+    def write(self, entry: dict) -> None:
+        if self.path is None:
+            return
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        except OSError:
+            pass
+
+
+def _units_json(units) -> list[dict]:
+    return [{"x": u.x, "y": u.y, "size": u.size, "kind": u.kind} for u in units]
+
+
+class FightContext:
+    """State shared by every tick of one fight: debounce, ability, pending play, logs."""
+
+    def __init__(self, brain=None, decision_log: DecisionLog | None = None) -> None:
+        self.brain = brain
+        self.ability = AbilityTrigger()
+        self.started_at = time.monotonic()
+        self.last_in_battle_at = self.started_at
+        self.first_in_battle_at: float | None = None
+        self.last_end_check = -1e9
+        self.last_lost_log_second = -1
+        self.pending: PendingPlay | None = None
+        self.decision_log = decision_log
+        self.frames = 0
+        self.plays = 0
+        self.deployed = 0
+        self.not_deployed = 0
+        self.blocked_until: dict[int, float] = {}  # slot -> time it may be played again
+        self.last_not_deployed_log = -1e9
+        self.last_status: str | None = None
+        self.last_status_at = -1e9
+        self.last_decision_key: Any = None
+        self.last_decision_at = -1e9
+
+    @property
+    def smart(self) -> bool:
+        return self.brain is not None
+
+    def match_clock(self, now: float) -> float:
+        """Seconds since the first in-battle frame (the match-clock anchor)."""
+        return now - self.first_in_battle_at if self.first_in_battle_at is not None else 0.0
+
+    def next_frame(self, emulator) -> TickFrame:
+        """Wait out the post-play settle time if needed, then take this tick's one screenshot."""
+        if self.pending is not None:
+            remaining = self.pending.tap_done_at + PLAY_SETTLE_S - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+        self.frames += 1
+        return capture_frame(emulator)
+
+    def observe(self, emulator, logger, frame: TickFrame) -> Literal["ok", "lost", "ended"]:
+        """Per-frame bookkeeping: battle-end debounce, enemies/threat, play verification, ability."""
+        now = frame.captured_at
+        if not frame.in_battle:
+            return self._lost(emulator, logger, now)
+        self.last_in_battle_at = now
+        if self.first_in_battle_at is None:
+            self.first_in_battle_at = now
+        if self.brain is not None and frame.iar is not None:
+            frame.enemies = find_enemy_units(frame.iar)
+            frame.friends = find_friendly_units(frame.iar)
+            if frame.enemies:
+                frame.threat = self.brain.should_defend_now(frame.enemies, frame.friends)
+            if frame.threat is not None and hasattr(self.brain, "note_threat"):
+                self.brain.note_threat(frame.threat, time.time())  # brain clocks are wall time
+        if self.pending is not None and now >= self.pending.tap_done_at + PLAY_SETTLE_S:
+            self._verify(logger, frame)
+        enemy = (bool(frame.enemies) or frame.threat is not None) if self.smart else None
+        self.ability.tick(emulator, logger, frame.iar, now, enemy)
+        return "ok"
+
+    def slot_blocked(self, slot: int, now: float) -> bool:
+        """True while ``slot`` is backing off after a play that did not deploy."""
+        return now < self.blocked_until.get(slot, -1e9)
+
+    def repeat_status(self, logger, status: str, now: float) -> None:
+        """change_status for a line that repeats every tick: on change or once per REPEAT_STATUS_S."""
+        if status == self.last_status and now - self.last_status_at < REPEAT_STATUS_S:
+            return
+        self.last_status = status
+        self.last_status_at = now
+        logger.change_status(status)
+
+    def ready_to_decide(self, frame: TickFrame) -> bool:
+        """No decision on a frame captured before the last play settled."""
+        return self.pending is None and frame.in_battle
+
+    def _lost(self, emulator, logger, now: float) -> Literal["lost", "ended"]:
+        lost_for = now - self.last_in_battle_at
+        if lost_for >= BATTLE_END_DEBOUNCE_S and now - self.last_end_check >= BATTLE_END_DEBOUNCE_S:
+            self.last_end_check = now
+            if check_if_battle_has_ended(emulator):
+                logger.change_status("Battle ended (confirmed)")
+                return "ended"
+        if lost_for >= BATTLE_LOST_GIVE_UP_S:
+            logger.change_status("Lost battle detection for too long — assuming battle ended")
+            return "ended"
+        second = int(lost_for)
+        if second != self.last_lost_log_second:
+            self.last_lost_log_second = second
+            logger.change_status(f"Lost battle detection for {second}s — waiting it out")
+        time.sleep(LOST_FRAME_SLEEP_S)
+        return "lost"
+
+    def _verify(self, logger, frame: TickFrame) -> None:
+        pending = self.pending
+        self.pending = None
+        if pending is None:
+            return
+        dropped = False
+        if pending.elixir_before is not None and frame.elixir is not None:
+            dropped = pending.elixir_before - frame.elixir >= max(1, card_cost(pending.card_id) - 1)
+        changed = _slot_changed(frame.iar, pending.slot, pending.fingerprint)
+        if changed:
+            # A card that failed to deploy stays in its slot (raised): same identity = not deployed.
+            # The raw hand read counts too, so an UNKNOWN the brain resolved still matches itself.
+            same = {pending.raw_card_id} if pending.raw_card_id is not None else set()
+            if not _is_unknown(pending.card_id):
+                same.add(pending.card_id)
+            if same and identify_hand_cards(None, pending.slot) in same:
+                changed = False
+        deployed = dropped or changed
+        if deployed:
+            self.deployed += 1
+        else:
+            self.not_deployed += 1
+            now = frame.captured_at
+            self.blocked_until[pending.slot] = now + NOT_DEPLOYED_BACKOFF_S
+            if now - self.last_not_deployed_log >= REPEAT_STATUS_S:
+                self.last_not_deployed_log = now
+                logger.log(f"Play not deployed: {pending.card_id} (slot {pending.slot})")
+        if self.brain is not None:
+            _brain_record(self.brain, pending.play, deployed)
+
+    def log_decision(self, frame: TickFrame, hand, full_hand, threats, play, tick_start: float) -> None:
+        """One JSONL line per play or change of hold reason / situation, else at most once a second."""
+        if self.decision_log is None:
+            return
+        now = time.monotonic()
+        brain = self.brain
+        key = (getattr(brain, "situation", None), getattr(brain, "_hold_reason", None))
+        if play is None and key == self.last_decision_key and now - self.last_decision_at < DECISION_LOG_MIN_GAP_S:
+            return
+        self.last_decision_key = key
+        self.last_decision_at = now
+        towers = None
+        if brain is not None and hasattr(brain, "enemy_tower_hp") and hasattr(brain, "own_tower_hp"):
+            towers = {
+                "enemy": {lane: brain.enemy_tower_hp(lane) for lane in ("left", "right")},
+                "own": {lane: brain.own_tower_hp(lane) for lane in ("left", "right")},
+            }
+        slots = full_hand if full_hand is not None else hand
+        chosen = None
+        if play is not None:
+            chosen = {
+                "card": play.card_id,
+                "slot": play.index,
+                "coord": list(play.coord),
+                "lane": play.lane,
+                "defensive": play.defensive,
+                "reason": play.reason,
+            }
+        self.decision_log.write(
+            {
+                "t": round(time.time(), 3),
+                "elapsed": round(self.match_clock(frame.captured_at), 2),
+                "elixir": frame.elixir,
+                "hand": {str(i): {"card": c, "affordable": i in hand} for i, c in sorted(slots.items())},
+                "threats": _units_json(threats),
+                "friends": _units_json(frame.friends),
+                "threat": _units_json([frame.threat])[0] if frame.threat is not None else None,
+                "towers": towers,
+                "play": chosen,
+                "situation": getattr(brain, "situation", None),
+                "frame_age": round(now - frame.captured_at, 3),
+                "tick_s": round(now - tick_start, 3),
+            }
+        )
+
+    def log_end(self, outcome: str) -> None:
+        if self.decision_log is None:
+            return
+        self.decision_log.write(
+            {
+                "event": "end",
+                "outcome": outcome,
+                "t": round(time.time(), 3),
+                "duration": round(time.monotonic() - self.started_at, 2),
+                "frames": self.frames,
+                "plays": self.plays,
+                "deployed": self.deployed,
+                "not_deployed": self.not_deployed,
+                "ability_fired": self.ability.fired,
+            }
+        )
+
+
 RANDOM_PLAY_ELIXIR_MIN = 3
 RANDOM_PLAY_ELIXIR_MAX = 9
 
 
-def play_random_available_card(emulator, logger, recording_flag: bool, elapsed_s: float) -> bool:
+def play_random_available_card(
+    emulator, logger, recording_flag: bool, elapsed_s: float, frame: TickFrame | None = None
+) -> bool:
     """Play one card that is actually available, at a random friendly-half coord.
 
     Mirrors the rl-bot RandomPlayer so recorded plays are never polluted with cards
     that didn't deploy: read the available hand slots (affordable, non-empty) and, if
     any, play a random one; if none are available, do nothing. Returns True if a card
-    was played. The caller gates this behind a random elixir wait.
+    was played. The caller gates this behind a random elixir wait. ``frame`` reuses the
+    wait's last screenshot instead of taking a new one.
     """
-    card_indices = check_which_cards_are_available(emulator, check_side=True)
+    if frame is not None and frame.in_battle:
+        card_indices = list(frame.available)
+    else:
+        card_indices = check_which_cards_are_available(emulator, check_side=True)
     if not card_indices:
         return False  # nothing playable -> no play, nothing recorded (caller re-rolls)
 
@@ -238,89 +733,79 @@ def wait_for_elixir(
     PLAY_THRESHOLD=10000,  # noqa: N803
     recording_flag: bool = False,
     brain: BattleBrain | None = None,
+    ctx: FightContext | None = None,
 ) -> Literal["restart", "no battle"] | bool:
-    """Method to wait for 4 elixir during a battle"""
-    start_time = time.time()
-    battle_detection_lost_count = 0
-    last_logged_second = -1
-    last_lost_detection_log_second = -1
-    ability_available_since = None
+    """Wait for ``elixir_wait_amount`` elixir during a battle, one screenshot per iteration."""
+    result, _ = _wait_for_elixir(
+        emulator, logger, elixir_wait_amount, WAIT_THRESHOLD, PLAY_THRESHOLD, recording_flag, brain, ctx
+    )
+    return result
 
-    while not count_elixir(emulator, elixir_wait_amount):
-        # debug screenshot saving removed from production
+
+def _wait_for_elixir(
+    emulator,
+    logger,
+    elixir_wait_amount: int,
+    wait_threshold: float,
+    play_threshold: float,
+    recording_flag: bool,
+    brain,
+    ctx: FightContext | None,
+) -> tuple[Literal["restart", "no battle"] | bool, TickFrame | None]:
+    """wait_for_elixir that also returns the frame it stopped on, so the caller can reuse it."""
+    if ctx is None:
+        ctx = FightContext(brain)
+    brain = ctx.brain
+    start_time = time.time()
+    last_logged_second = -1
+    last_threat_log_second = -1
+
+    while True:
+        frame = ctx.next_frame(emulator)
+        status = ctx.observe(emulator, logger, frame)
+        if status == "ended":
+            logger.change_status(status="Battle ended — stopping elixir wait")
+            return "no battle", frame
         wait_time = time.time() - start_time
+        if status == "lost":
+            continue
+
+        if frame.elixir is not None and frame.elixir >= elixir_wait_amount:
+            logger.change_status(f"Took {str(wait_time)[:4]}s for {elixir_wait_amount} elixir.")
+            return True, frame
+
         elapsed_second = int(wait_time)
         if elapsed_second != last_logged_second:
-            logger.change_status(
-                f"Waiting for {elixir_wait_amount} elixir for {elapsed_second}s...",
-            )
+            logger.change_status(f"Waiting for {elixir_wait_amount} elixir for {elapsed_second}s...")
             last_logged_second = elapsed_second
 
-        card_indices = check_which_cards_are_available(emulator)
-        if brain is not None and card_indices:
-            iar = card_detection.battle_iar
-            enemies = find_enemy_units(iar)
-            if recording_flag:
-                log_units(iar, enemies)
-            threat = brain.should_defend_now(enemies, find_friendly_units(iar))
+        card_inhand = len(frame.available)
+        if brain is not None and card_inhand:
+            iar = frame.iar
+            if recording_flag and frame.enemies:
+                log_units(iar, classify_units(iar, frame.enemies))
+            threat = frame.threat
             if threat is not None:
-                logger.change_status(f"Enemy push in the {threat.lane} lane — defending now")
-                return True
+                budget = brain.defense_budget(threat) if hasattr(brain, "defense_budget") else 0
+                if (frame.elixir or 0) >= budget or threat.y >= DEEP_THREAT_Y:
+                    logger.change_status(f"Enemy push in the {threat.lane} lane — defending now")
+                    return True, frame
+                if elapsed_second != last_threat_log_second:
+                    logger.change_status(f"Enemy push in the {threat.lane} lane — saving up {budget} elixir")
+                    last_threat_log_second = elapsed_second
 
-        if is_hero_champion_ability_visible(emulator):
-            if ability_available_since is None:
-                ability_available_since = time.time()
-                logger.change_status(
-                    f"Hero/Champion ability ready — triggering in {ABILITY_TRIGGER_DELAY_S}s",
-                )
-            elif time.time() - ability_available_since >= ABILITY_TRIGGER_DELAY_S:
-                trigger_hero_champion_ability(emulator, logger)
-                ability_available_since = None
-        else:
-            ability_available_since = None
-
-        card_inhand = len(card_indices)
-        action_offset, _ = switch_side()
-        if action_offset > PLAY_THRESHOLD and card_inhand > 0:
-            logger.change_status("Battle too active — playing now")
-            return True
-
-        if action_offset > WAIT_THRESHOLD and card_inhand == 4:
-            logger.change_status("All cards are available!")
-            return True
+        if card_detection.bridge_iar is not None and frame.iar is not None:
+            action_offset, _ = switch_side()
+            if action_offset > play_threshold and card_inhand > 0:
+                logger.change_status("Battle too active — playing now")
+                return True, frame
+            if action_offset > wait_threshold and card_inhand == 4:
+                logger.change_status("All cards are available!")
+                return True, frame
 
         if wait_time > ELIXIR_WAIT_TIMEOUT:
             logger.change_status(status="Waited too long for elixir")
-            return "restart"
-
-        if not check_for_in_battle_with_delay(emulator):
-            if check_if_battle_has_ended(emulator):
-                logger.change_status(status="Battle ended — stopping elixir wait")
-                return "no battle"
-
-            battle_detection_lost_count += 1
-            lost_detection_second = int(time.time())
-            if lost_detection_second != last_lost_detection_log_second:
-                logger.change_status(
-                    status="Lost battle detection while waiting for elixir — assuming still in battle",
-                )
-                last_lost_detection_log_second = lost_detection_second
-            if battle_detection_lost_count >= 4:
-                logger.change_status(
-                    status="Lost battle detection repeatedly — assuming battle ended",
-                )
-                return "no battle"
-
-            time.sleep(0.5)
-            continue
-
-        battle_detection_lost_count = 0
-
-    logger.change_status(
-        f"Took {str(time.time() - start_time)[:4]}s for {elixir_wait_amount} elixir.",
-    )
-
-    return True
+            return "restart", frame
 
 
 def end_fight_state(
@@ -494,40 +979,74 @@ def play_a_card(emulator, logger, recording_flag: bool, battle_strategy: "Battle
 
 
 def play_smart_card(
-    emulator, logger, recording_flag: bool, battle_strategy: "BattleStrategy", brain: BattleBrain
+    emulator,
+    logger,
+    recording_flag: bool,
+    battle_strategy: "BattleStrategy",
+    brain: BattleBrain,
+    frame: TickFrame | None = None,
+    ctx: FightContext | None = None,
 ) -> bool | Literal["hold"]:
-    """Read the hand and the board, then let the battle brain pick the card and spot.
+    """Read the hand and the board from one frame, then let the battle brain pick the card and spot.
 
     Returns "hold" when the brain chose to wait (saving elixir) rather than failing to play.
+    With ``ctx`` the play is verified on a later frame before the brain records it; without
+    it (standalone use) the play is recorded right away, as before.
     """
-    card_indices = check_which_cards_are_available(emulator, check_side=True)
+    tick_start = time.monotonic()
+    if frame is None:
+        frame = capture_frame(emulator)
+        frame.available = _available_slots(frame.iar)
+        if frame.iar is not None:
+            frame.enemies = find_enemy_units(frame.iar)
+            frame.friends = find_friendly_units(frame.iar)
+    _update_play_side()
+    card_indices = frame.available
     if not card_indices:
-        logger.change_status("No cards ready yet...")
+        if ctx is not None:
+            ctx.repeat_status(logger, "No cards ready yet...", frame.captured_at)
+        else:
+            logger.change_status("No cards ready yet...")
         return False
 
-    iar = card_detection.battle_iar
-    hand = {index: identify_hand_cards(emulator, index) for index in card_indices}
-    threats = classify_units(iar, find_enemy_units(iar))
-    friends = find_friendly_units(iar)
+    iar = frame.iar
+    read_hand, full_hand = _identify_hand(emulator, iar, card_indices)
+    hand = read_hand
+    if ctx is not None:
+        # A slot backing off after a failed deploy stays affordable for the deck tracker but isn't played.
+        hand = {i: c for i, c in read_hand.items() if not ctx.slot_blocked(i, frame.captured_at)}
+    threats = classify_units(iar, frame.enemies)
+    friends = frame.friends
     brain.observe_towers(read_tower_health(iar))
     elapsed = battle_strategy.get_elapsed_time()
     if recording_flag:
         log_units(iar, threats, elapsed)
-    elixir = read_elixir(iar) if iar is not None else None
-    play = brain.choose(hand, threats, elapsed, elixir=elixir, friends=friends)
+    clock = ctx.match_clock(frame.captured_at) if ctx is not None else None
+    play = _brain_choose(brain, hand, threats, elapsed, frame.elixir, friends, clock, full_hand, set(read_hand))
+    if ctx is not None:
+        ctx.log_decision(frame, read_hand, full_hand, threats, play, tick_start)
     if play is None:
-        logger.change_status(f"Holding — {brain.situation}")
-        time.sleep(0.5)
+        if ctx is not None:
+            ctx.repeat_status(logger, f"Holding — {brain.situation}", frame.captured_at)
+        else:
+            logger.change_status(f"Holding — {brain.situation}")
         return "hold"
 
     logger.change_status(f"Playing {play.card_id} — {play.reason}")
     logger.log(f"Board: {brain.situation}")
-    emulator.click(*HAND_CARDS_COORDS[play.index])
-    emulator.click(*play.coord)
+    fingerprint = _slot_fingerprint(iar, play.index)
+    _tap_card(emulator, HAND_CARDS_COORDS[play.index], play.coord)
+    tap_done_at = time.monotonic()
     if recording_flag:
         log_play(play.index, play.coord[0], play.coord[1], elapsed)
     logger.add_card_played()
-    brain.record(play)
+    if ctx is None:
+        brain.record(play)
+    else:
+        ctx.plays += 1
+        ctx.pending = PendingPlay(
+            play, play.index, play.card_id, frame.elixir, fingerprint, tap_done_at, read_hand.get(play.index)
+        )
     return True
 
 
@@ -611,9 +1130,9 @@ def _fight_loop(
     """Method for handling dynamically timed fight"""
     create_default_bridge_iar(emulator)
     _maybe_start_fight_recording(emulator, logger, recording_flag, fight_mode, custom_path)
+    _configure_hand_crops(recording_flag, custom_path)
     last_three_cards.clear()
     prev_cards_played = logger.get_cards_played()
-    battle_detection_lost_count = 0
 
     # Initialize battle strategy and start timing
     battle_strategy = BattleStrategy(fight_mode)
@@ -621,74 +1140,38 @@ def _fight_loop(
     brain = BattleBrain() if smart_battle else None
     if brain is not None:
         logger.log(f"Smart battle AI on — opening in the {brain.attack_lane} lane")
+    ctx = FightContext(brain, DecisionLog() if brain is not None else None)
 
     while True:
-        if not check_for_in_battle_with_delay(emulator):
-            if check_if_battle_has_ended(emulator):
-                break
-
-            battle_detection_lost_count += 1
-            logger.change_status(
-                f"Lost battle detection mid-fight ({battle_detection_lost_count}) — waiting it out",
-            )
-
-            # If we've lost detection several times in a row, assume the battle
-            # ended even if we couldn't confirm it (prevents infinite loops if UI changes).
-            if battle_detection_lost_count >= 4:
-                logger.change_status(
-                    "Lost battle detection repeatedly — assuming battle ended",
-                )
-                break
-
-            time.sleep(1)
-            continue
-
-        battle_detection_lost_count = 0
-        # debug screenshot saving removed from production
-
-        # Get elixir amount and thresholds based on current battle phase
+        # Preamble: wait for elixir (one frame per iteration; ability + battle-end handled per frame).
         # The smart brain reads elixir itself and decides when to hold, so it only waits for a cheap card.
         elixir_amount = SMART_MIN_ELIXIR if brain is not None else battle_strategy.select_elixir_amount()
         wait_threshold, play_threshold = battle_strategy.get_thresholds()
-
-        wait_output = wait_for_elixir(
-            emulator,
-            logger,
-            elixir_amount,
-            wait_threshold,
-            play_threshold,
-            recording_flag,
-            brain,
+        wait_output, frame = _wait_for_elixir(
+            emulator, logger, elixir_amount, wait_threshold, play_threshold, recording_flag, brain, ctx
         )
 
         if wait_output == "restart":
             logger.change_status("Failed while waiting for elixir")
+            ctx.log_end("restart")
             return False
 
         if wait_output == "no battle":
             logger.change_status("Not in battle anymore!")
             break
 
-        if not check_if_in_battle(emulator):
-            if check_if_battle_has_ended(emulator):
-                logger.change_status("Battle ended (confirmed)")
-                break
-
-            logger.change_status("Lost battle detection — continuing fight loop")
+        if brain is None:
+            play_start_time = time.time()
+            if play_a_card(emulator, logger, recording_flag, battle_strategy) is False:
+                logger.change_status("Failed to play a card, retrying...")
+            else:
+                logger.change_status(f"Made a play in {str(time.time() - play_start_time)[:4]}s")
             continue
 
-        play_start_time = time.time()
-        if brain is not None:
-            played = play_smart_card(emulator, logger, recording_flag, battle_strategy, brain)
-        else:
-            played = play_a_card(emulator, logger, recording_flag, battle_strategy)
-        if played == "hold":
-            continue
-        if played is False:
-            logger.change_status("Failed to play a card, retrying...")
-        else:
-            logger.change_status(f"Made a play in {str(time.time() - play_start_time)[:4]}s")
+        if _smart_ticks(emulator, logger, recording_flag, battle_strategy, brain, ctx, frame) == "ended":
+            break
 
+    ctx.log_end("ended")
     # Fight over: freeze capture so the pack excludes post-fight nav (manifest/outcome written later).
     stop_fight_capture()
     logger.change_status("Fight complete")
@@ -697,6 +1180,36 @@ def _fight_loop(
     logger.change_status(f"Played ~{cards_played - prev_cards_played} cards this fight")
 
     return True
+
+
+def _smart_ticks(
+    emulator,
+    logger,
+    recording_flag: bool,
+    battle_strategy: "BattleStrategy",
+    brain,
+    ctx: FightContext,
+    frame: TickFrame | None,
+) -> Literal["ended", "preamble"]:
+    """The smart tick loop: one screenshot per iteration, decide on that frame, hold = next tick.
+
+    Starts on ``frame`` (the preamble's last screenshot) without taking a new one. Returns
+    "preamble" after a play or every PREAMBLE_BACKSTOP_S of holding, "ended" when the battle ends.
+    """
+    entered = time.monotonic()
+    while True:
+        if frame is None:
+            frame = ctx.next_frame(emulator)
+            status = ctx.observe(emulator, logger, frame)
+            if status == "ended":
+                return "ended"
+        if ctx.ready_to_decide(frame):
+            played = play_smart_card(emulator, logger, recording_flag, battle_strategy, brain, frame, ctx)
+            if played is True:
+                return "preamble"
+        frame = None
+        if time.monotonic() - entered >= PREAMBLE_BACKSTOP_S:
+            return "preamble"
 
 
 def _random_fight_loop(
@@ -712,29 +1225,10 @@ def _random_fight_loop(
     create_default_bridge_iar(emulator)
     fight_timeout = 5 * 60  # 5 minutes
     start_time = time.time()
-    battle_detection_lost_count = 0
+    ctx = FightContext()
 
     # while in battle:
     while True:
-        if not check_for_in_battle_with_delay(emulator):
-            if check_if_battle_has_ended(emulator):
-                break
-
-            battle_detection_lost_count += 1
-            logger.change_status(
-                f"Lost battle detection mid-fight ({battle_detection_lost_count}) — waiting it out",
-            )
-
-            if battle_detection_lost_count >= 4:
-                logger.change_status(
-                    "Lost battle detection repeatedly — assuming battle ended",
-                )
-                break
-
-            time.sleep(1)
-            continue
-
-        battle_detection_lost_count = 0
         if time.time() - start_time > fight_timeout:
             logger.change_status("Random fight loop timed out after 5 minutes")
             return False
@@ -742,12 +1236,12 @@ def _random_fight_loop(
         # Clean random-play flow (mirrors rl-bot RandomPlayer): wait for a random
         # elixir gate, then play only if a card is actually available.
         target = random.randint(RANDOM_PLAY_ELIXIR_MIN, RANDOM_PLAY_ELIXIR_MAX)
-        elixir_result = wait_for_elixir(emulator, logger, target, recording_flag=recording_flag)
+        elixir_result, frame = _wait_for_elixir(emulator, logger, target, 5000, 10000, recording_flag, None, ctx)
         if elixir_result == "no battle":
             break
         if elixir_result == "restart":
             return False
-        play_random_available_card(emulator, logger, recording_flag, time.time() - start_time)
+        play_random_available_card(emulator, logger, recording_flag, time.time() - start_time, frame)
 
     # Fight over: freeze capture so the pack excludes post-fight nav (manifest/outcome written later).
     stop_fight_capture()

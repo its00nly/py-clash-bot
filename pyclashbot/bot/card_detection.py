@@ -2,6 +2,7 @@ import random
 import time
 from collections import Counter
 
+import cv2
 import numpy
 
 from pyclashbot.bot.coords import CHAMPION_ABILITY_DISMISS_COORD
@@ -978,228 +979,6 @@ card_color_data = {
             "Maroon": 59,
         },
     ],
-    "boss_bandit": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 26,
-            "Violet": 6,
-            "Cyan": 0,
-            "Magenta": 19,
-            "Pink": 20,
-            "Turquoise": 2,
-            "Lime": 0,
-            "Purple": 6,
-            "Brown": 20,
-            "Teal": 0,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 28,
-            "Violet": 3,
-            "Cyan": 0,
-            "Magenta": 35,
-            "Pink": 19,
-            "Turquoise": 2,
-            "Lime": 0,
-            "Purple": 9,
-            "Brown": 0,
-            "Teal": 3,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 19,
-            "Violet": 15,
-            "Cyan": 0,
-            "Magenta": 4,
-            "Pink": 21,
-            "Turquoise": 1,
-            "Lime": 0,
-            "Purple": 23,
-            "Brown": 12,
-            "Teal": 1,
-            "Maroon": 4,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 22,
-            "Violet": 8,
-            "Cyan": 0,
-            "Magenta": 16,
-            "Pink": 27,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 14,
-            "Brown": 8,
-            "Teal": 0,
-            "Maroon": 5,
-        },
-    ],
-    "goblinstein": [
-        {
-            "Red": 0,
-            "Orange": 1,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 13,
-            "Violet": 4,
-            "Cyan": 0,
-            "Magenta": 26,
-            "Pink": 35,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 4,
-            "Brown": 2,
-            "Teal": 0,
-            "Maroon": 15,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 18,
-            "Violet": 2,
-            "Cyan": 0,
-            "Magenta": 30,
-            "Pink": 21,
-            "Turquoise": 9,
-            "Lime": 0,
-            "Purple": 7,
-            "Brown": 0,
-            "Teal": 9,
-            "Maroon": 4,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 16,
-            "Violet": 19,
-            "Cyan": 0,
-            "Magenta": 9,
-            "Pink": 22,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 23,
-            "Brown": 3,
-            "Teal": 0,
-            "Maroon": 8,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 20,
-            "Violet": 10,
-            "Cyan": 0,
-            "Magenta": 15,
-            "Pink": 24,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 9,
-            "Brown": 9,
-            "Teal": 5,
-            "Maroon": 7,
-        },
-    ],
-    "golden_knight": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 22,
-            "Violet": 4,
-            "Cyan": 0,
-            "Magenta": 26,
-            "Pink": 8,
-            "Turquoise": 25,
-            "Lime": 0,
-            "Purple": 5,
-            "Brown": 0,
-            "Teal": 9,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 15,
-            "Violet": 6,
-            "Cyan": 0,
-            "Magenta": 38,
-            "Pink": 21,
-            "Turquoise": 6,
-            "Lime": 0,
-            "Purple": 2,
-            "Brown": 0,
-            "Teal": 10,
-            "Maroon": 2,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 25,
-            "Violet": 22,
-            "Cyan": 0,
-            "Magenta": 4,
-            "Pink": 13,
-            "Turquoise": 2,
-            "Lime": 0,
-            "Purple": 21,
-            "Brown": 12,
-            "Teal": 0,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 26,
-            "Violet": 15,
-            "Cyan": 0,
-            "Magenta": 11,
-            "Pink": 30,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 5,
-            "Brown": 8,
-            "Teal": 0,
-            "Maroon": 5,
-        },
-    ],
     "little_prince": [
         {
             "Red": 0,
@@ -1274,80 +1053,6 @@ card_color_data = {
             "Maroon": 223,
         },
     ],
-    "skeleton_dragons": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 16,
-            "Violet": 3,
-            "Cyan": 0,
-            "Magenta": 25,
-            "Pink": 18,
-            "Turquoise": 10,
-            "Lime": 0,
-            "Purple": 7,
-            "Brown": 6,
-            "Teal": 13,
-            "Maroon": 2,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 12,
-            "Violet": 5,
-            "Cyan": 0,
-            "Magenta": 40,
-            "Pink": 33,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 4,
-            "Brown": 2,
-            "Teal": 0,
-            "Maroon": 4,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 2,
-            "Blue": 0,
-            "Indigo": 25,
-            "Violet": 21,
-            "Cyan": 0,
-            "Magenta": 2,
-            "Pink": 17,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 21,
-            "Brown": 4,
-            "Teal": 0,
-            "Maroon": 8,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 23,
-            "Violet": 15,
-            "Cyan": 0,
-            "Magenta": 12,
-            "Pink": 29,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 9,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 11,
-        },
-    ],
     "mirror": [
         {
             "Red": 0,
@@ -1420,376 +1125,6 @@ card_color_data = {
             "Brown": 154,
             "Teal": 138,
             "Maroon": 45,
-        },
-    ],
-    "monk": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 15,
-            "Violet": 3,
-            "Cyan": 0,
-            "Magenta": 23,
-            "Pink": 25,
-            "Turquoise": 23,
-            "Lime": 0,
-            "Purple": 8,
-            "Brown": 0,
-            "Teal": 2,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 15,
-            "Violet": 2,
-            "Cyan": 0,
-            "Magenta": 38,
-            "Pink": 25,
-            "Turquoise": 2,
-            "Lime": 0,
-            "Purple": 8,
-            "Brown": 0,
-            "Teal": 1,
-            "Maroon": 8,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 21,
-            "Violet": 18,
-            "Cyan": 0,
-            "Magenta": 6,
-            "Pink": 16,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 20,
-            "Brown": 12,
-            "Teal": 0,
-            "Maroon": 7,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 23,
-            "Violet": 10,
-            "Cyan": 0,
-            "Magenta": 16,
-            "Pink": 29,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 9,
-            "Brown": 8,
-            "Teal": 0,
-            "Maroon": 5,
-        },
-    ],
-    "skeleton_king": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 14,
-            "Violet": 5,
-            "Cyan": 0,
-            "Magenta": 29,
-            "Pink": 8,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 3,
-            "Brown": 39,
-            "Teal": 1,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 15,
-            "Violet": 5,
-            "Cyan": 0,
-            "Magenta": 30,
-            "Pink": 13,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 3,
-            "Brown": 3,
-            "Teal": 0,
-            "Maroon": 31,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 21,
-            "Violet": 24,
-            "Cyan": 0,
-            "Magenta": 7,
-            "Pink": 20,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 24,
-            "Brown": 3,
-            "Teal": 0,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 19,
-            "Violet": 14,
-            "Cyan": 0,
-            "Magenta": 10,
-            "Pink": 33,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 5,
-            "Brown": 11,
-            "Teal": 0,
-            "Maroon": 8,
-        },
-    ],
-    "hunter": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 17,
-            "Violet": 4,
-            "Cyan": 0,
-            "Magenta": 26,
-            "Pink": 8,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 4,
-            "Brown": 40,
-            "Teal": 0,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 14,
-            "Violet": 6,
-            "Cyan": 0,
-            "Magenta": 38,
-            "Pink": 21,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 2,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 18,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 2,
-            "Blue": 0,
-            "Indigo": 22,
-            "Violet": 22,
-            "Cyan": 0,
-            "Magenta": 4,
-            "Pink": 15,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 22,
-            "Brown": 5,
-            "Teal": 0,
-            "Maroon": 8,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 27,
-            "Violet": 16,
-            "Cyan": 0,
-            "Magenta": 11,
-            "Pink": 28,
-            "Turquoise": 1,
-            "Lime": 0,
-            "Purple": 6,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 10,
-        },
-    ],
-    "goblin_machine": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 35,
-            "Violet": 3,
-            "Cyan": 0,
-            "Magenta": 23,
-            "Pink": 11,
-            "Turquoise": 2,
-            "Lime": 0,
-            "Purple": 7,
-            "Brown": 0,
-            "Teal": 18,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 16,
-            "Violet": 2,
-            "Cyan": 0,
-            "Magenta": 38,
-            "Pink": 14,
-            "Turquoise": 2,
-            "Lime": 0,
-            "Purple": 9,
-            "Brown": 0,
-            "Teal": 10,
-            "Maroon": 8,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 24,
-            "Violet": 18,
-            "Cyan": 0,
-            "Magenta": 6,
-            "Pink": 13,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 22,
-            "Brown": 8,
-            "Teal": 0,
-            "Maroon": 9,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 26,
-            "Violet": 10,
-            "Cyan": 0,
-            "Magenta": 16,
-            "Pink": 28,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 9,
-            "Brown": 5,
-            "Teal": 0,
-            "Maroon": 6,
-        },
-    ],
-    "prince": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 20,
-            "Violet": 3,
-            "Cyan": 0,
-            "Magenta": 23,
-            "Pink": 17,
-            "Turquoise": 8,
-            "Lime": 0,
-            "Purple": 8,
-            "Brown": 0,
-            "Teal": 20,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 5,
-            "Blue": 0,
-            "Indigo": 22,
-            "Violet": 2,
-            "Cyan": 0,
-            "Magenta": 38,
-            "Pink": 13,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 7,
-            "Brown": 0,
-            "Teal": 5,
-            "Maroon": 8,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 25,
-            "Violet": 18,
-            "Cyan": 2,
-            "Magenta": 6,
-            "Pink": 14,
-            "Turquoise": 1,
-            "Lime": 0,
-            "Purple": 20,
-            "Brown": 0,
-            "Teal": 3,
-            "Maroon": 11,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 23,
-            "Violet": 10,
-            "Cyan": 1,
-            "Magenta": 16,
-            "Pink": 29,
-            "Turquoise": 1,
-            "Lime": 0,
-            "Purple": 9,
-            "Brown": 0,
-            "Teal": 3,
-            "Maroon": 8,
         },
     ],
     "sparky": [
@@ -2382,154 +1717,6 @@ card_color_data = {
             "Brown": 18,
             "Teal": 4,
             "Maroon": 64,
-        },
-    ],
-    "executioner": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 13,
-            "Violet": 4,
-            "Cyan": 0,
-            "Magenta": 26,
-            "Pink": 51,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 4,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 2,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 0,
-            "Blue": 0,
-            "Indigo": 33,
-            "Violet": 2,
-            "Cyan": 0,
-            "Magenta": 30,
-            "Pink": 9,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 7,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 19,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 17,
-            "Violet": 19,
-            "Cyan": 0,
-            "Magenta": 9,
-            "Pink": 22,
-            "Turquoise": 0,
-            "Lime": 0,
-            "Purple": 23,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 9,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 3,
-            "Blue": 0,
-            "Indigo": 20,
-            "Violet": 10,
-            "Cyan": 0,
-            "Magenta": 15,
-            "Pink": 27,
-            "Turquoise": 3,
-            "Lime": 0,
-            "Purple": 8,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 14,
-        },
-    ],
-    "cannon_cart": [
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 3,
-            "Blue": 0,
-            "Indigo": 24,
-            "Violet": 2,
-            "Cyan": 0,
-            "Magenta": 22,
-            "Pink": 11,
-            "Turquoise": 4,
-            "Lime": 0,
-            "Purple": 7,
-            "Brown": 2,
-            "Teal": 24,
-            "Maroon": 1,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 14,
-            "Violet": 3,
-            "Cyan": 0,
-            "Magenta": 40,
-            "Pink": 13,
-            "Turquoise": 4,
-            "Lime": 0,
-            "Purple": 8,
-            "Brown": 0,
-            "Teal": 9,
-            "Maroon": 8,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 3,
-            "Blue": 0,
-            "Indigo": 23,
-            "Violet": 19,
-            "Cyan": 0,
-            "Magenta": 4,
-            "Pink": 13,
-            "Turquoise": 2,
-            "Lime": 0,
-            "Purple": 18,
-            "Brown": 0,
-            "Teal": 4,
-            "Maroon": 14,
-        },
-        {
-            "Red": 0,
-            "Orange": 0,
-            "Yellow": 0,
-            "Green": 1,
-            "Blue": 0,
-            "Indigo": 21,
-            "Violet": 9,
-            "Cyan": 0,
-            "Magenta": 17,
-            "Pink": 28,
-            "Turquoise": 1,
-            "Lime": 0,
-            "Purple": 13,
-            "Brown": 0,
-            "Teal": 0,
-            "Maroon": 10,
         },
     ],
     "evo_battle_ram": [
@@ -11488,6 +10675,829 @@ card_color_data = {
     ],
 }
 
+# Disabled (see d69d5378 / #579): these 11 entries were captured as percentages, so every
+# corner sums to 100 instead of HALF_WIDTH*HALF_HEIGHT (891). The best possible L1 distance
+# to a live crop is 4*(891-100)=3164, far above any accept threshold, so they could never
+# match. Rescaling does not help either: their colour mix is unlike any real capture and,
+# rescaled, they sit closer to each other than real cards do. Kept only as a record;
+# re-capture these cards from real screenshots (hand_crop_sink) instead.
+_DISABLED_PERCENT_FINGERPRINTS = {
+    "boss_bandit": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 26,
+            "Violet": 6,
+            "Cyan": 0,
+            "Magenta": 19,
+            "Pink": 20,
+            "Turquoise": 2,
+            "Lime": 0,
+            "Purple": 6,
+            "Brown": 20,
+            "Teal": 0,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 28,
+            "Violet": 3,
+            "Cyan": 0,
+            "Magenta": 35,
+            "Pink": 19,
+            "Turquoise": 2,
+            "Lime": 0,
+            "Purple": 9,
+            "Brown": 0,
+            "Teal": 3,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 19,
+            "Violet": 15,
+            "Cyan": 0,
+            "Magenta": 4,
+            "Pink": 21,
+            "Turquoise": 1,
+            "Lime": 0,
+            "Purple": 23,
+            "Brown": 12,
+            "Teal": 1,
+            "Maroon": 4,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 22,
+            "Violet": 8,
+            "Cyan": 0,
+            "Magenta": 16,
+            "Pink": 27,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 14,
+            "Brown": 8,
+            "Teal": 0,
+            "Maroon": 5,
+        },
+    ],
+    "goblinstein": [
+        {
+            "Red": 0,
+            "Orange": 1,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 13,
+            "Violet": 4,
+            "Cyan": 0,
+            "Magenta": 26,
+            "Pink": 35,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 4,
+            "Brown": 2,
+            "Teal": 0,
+            "Maroon": 15,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 18,
+            "Violet": 2,
+            "Cyan": 0,
+            "Magenta": 30,
+            "Pink": 21,
+            "Turquoise": 9,
+            "Lime": 0,
+            "Purple": 7,
+            "Brown": 0,
+            "Teal": 9,
+            "Maroon": 4,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 16,
+            "Violet": 19,
+            "Cyan": 0,
+            "Magenta": 9,
+            "Pink": 22,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 23,
+            "Brown": 3,
+            "Teal": 0,
+            "Maroon": 8,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 20,
+            "Violet": 10,
+            "Cyan": 0,
+            "Magenta": 15,
+            "Pink": 24,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 9,
+            "Brown": 9,
+            "Teal": 5,
+            "Maroon": 7,
+        },
+    ],
+    "golden_knight": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 22,
+            "Violet": 4,
+            "Cyan": 0,
+            "Magenta": 26,
+            "Pink": 8,
+            "Turquoise": 25,
+            "Lime": 0,
+            "Purple": 5,
+            "Brown": 0,
+            "Teal": 9,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 15,
+            "Violet": 6,
+            "Cyan": 0,
+            "Magenta": 38,
+            "Pink": 21,
+            "Turquoise": 6,
+            "Lime": 0,
+            "Purple": 2,
+            "Brown": 0,
+            "Teal": 10,
+            "Maroon": 2,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 25,
+            "Violet": 22,
+            "Cyan": 0,
+            "Magenta": 4,
+            "Pink": 13,
+            "Turquoise": 2,
+            "Lime": 0,
+            "Purple": 21,
+            "Brown": 12,
+            "Teal": 0,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 26,
+            "Violet": 15,
+            "Cyan": 0,
+            "Magenta": 11,
+            "Pink": 30,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 5,
+            "Brown": 8,
+            "Teal": 0,
+            "Maroon": 5,
+        },
+    ],
+    "monk": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 15,
+            "Violet": 3,
+            "Cyan": 0,
+            "Magenta": 23,
+            "Pink": 25,
+            "Turquoise": 23,
+            "Lime": 0,
+            "Purple": 8,
+            "Brown": 0,
+            "Teal": 2,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 15,
+            "Violet": 2,
+            "Cyan": 0,
+            "Magenta": 38,
+            "Pink": 25,
+            "Turquoise": 2,
+            "Lime": 0,
+            "Purple": 8,
+            "Brown": 0,
+            "Teal": 1,
+            "Maroon": 8,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 21,
+            "Violet": 18,
+            "Cyan": 0,
+            "Magenta": 6,
+            "Pink": 16,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 20,
+            "Brown": 12,
+            "Teal": 0,
+            "Maroon": 7,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 23,
+            "Violet": 10,
+            "Cyan": 0,
+            "Magenta": 16,
+            "Pink": 29,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 9,
+            "Brown": 8,
+            "Teal": 0,
+            "Maroon": 5,
+        },
+    ],
+    "skeleton_king": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 14,
+            "Violet": 5,
+            "Cyan": 0,
+            "Magenta": 29,
+            "Pink": 8,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 3,
+            "Brown": 39,
+            "Teal": 1,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 15,
+            "Violet": 5,
+            "Cyan": 0,
+            "Magenta": 30,
+            "Pink": 13,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 3,
+            "Brown": 3,
+            "Teal": 0,
+            "Maroon": 31,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 21,
+            "Violet": 24,
+            "Cyan": 0,
+            "Magenta": 7,
+            "Pink": 20,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 24,
+            "Brown": 3,
+            "Teal": 0,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 19,
+            "Violet": 14,
+            "Cyan": 0,
+            "Magenta": 10,
+            "Pink": 33,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 5,
+            "Brown": 11,
+            "Teal": 0,
+            "Maroon": 8,
+        },
+    ],
+    "hunter": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 17,
+            "Violet": 4,
+            "Cyan": 0,
+            "Magenta": 26,
+            "Pink": 8,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 4,
+            "Brown": 40,
+            "Teal": 0,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 14,
+            "Violet": 6,
+            "Cyan": 0,
+            "Magenta": 38,
+            "Pink": 21,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 2,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 18,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 2,
+            "Blue": 0,
+            "Indigo": 22,
+            "Violet": 22,
+            "Cyan": 0,
+            "Magenta": 4,
+            "Pink": 15,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 22,
+            "Brown": 5,
+            "Teal": 0,
+            "Maroon": 8,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 27,
+            "Violet": 16,
+            "Cyan": 0,
+            "Magenta": 11,
+            "Pink": 28,
+            "Turquoise": 1,
+            "Lime": 0,
+            "Purple": 6,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 10,
+        },
+    ],
+    "prince": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 20,
+            "Violet": 3,
+            "Cyan": 0,
+            "Magenta": 23,
+            "Pink": 17,
+            "Turquoise": 8,
+            "Lime": 0,
+            "Purple": 8,
+            "Brown": 0,
+            "Teal": 20,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 5,
+            "Blue": 0,
+            "Indigo": 22,
+            "Violet": 2,
+            "Cyan": 0,
+            "Magenta": 38,
+            "Pink": 13,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 7,
+            "Brown": 0,
+            "Teal": 5,
+            "Maroon": 8,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 25,
+            "Violet": 18,
+            "Cyan": 2,
+            "Magenta": 6,
+            "Pink": 14,
+            "Turquoise": 1,
+            "Lime": 0,
+            "Purple": 20,
+            "Brown": 0,
+            "Teal": 3,
+            "Maroon": 11,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 23,
+            "Violet": 10,
+            "Cyan": 1,
+            "Magenta": 16,
+            "Pink": 29,
+            "Turquoise": 1,
+            "Lime": 0,
+            "Purple": 9,
+            "Brown": 0,
+            "Teal": 3,
+            "Maroon": 8,
+        },
+    ],
+    "executioner": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 13,
+            "Violet": 4,
+            "Cyan": 0,
+            "Magenta": 26,
+            "Pink": 51,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 4,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 2,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 33,
+            "Violet": 2,
+            "Cyan": 0,
+            "Magenta": 30,
+            "Pink": 9,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 7,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 19,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 17,
+            "Violet": 19,
+            "Cyan": 0,
+            "Magenta": 9,
+            "Pink": 22,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 23,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 9,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 3,
+            "Blue": 0,
+            "Indigo": 20,
+            "Violet": 10,
+            "Cyan": 0,
+            "Magenta": 15,
+            "Pink": 27,
+            "Turquoise": 3,
+            "Lime": 0,
+            "Purple": 8,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 14,
+        },
+    ],
+    "cannon_cart": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 3,
+            "Blue": 0,
+            "Indigo": 24,
+            "Violet": 2,
+            "Cyan": 0,
+            "Magenta": 22,
+            "Pink": 11,
+            "Turquoise": 4,
+            "Lime": 0,
+            "Purple": 7,
+            "Brown": 2,
+            "Teal": 24,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 14,
+            "Violet": 3,
+            "Cyan": 0,
+            "Magenta": 40,
+            "Pink": 13,
+            "Turquoise": 4,
+            "Lime": 0,
+            "Purple": 8,
+            "Brown": 0,
+            "Teal": 9,
+            "Maroon": 8,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 3,
+            "Blue": 0,
+            "Indigo": 23,
+            "Violet": 19,
+            "Cyan": 0,
+            "Magenta": 4,
+            "Pink": 13,
+            "Turquoise": 2,
+            "Lime": 0,
+            "Purple": 18,
+            "Brown": 0,
+            "Teal": 4,
+            "Maroon": 14,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 21,
+            "Violet": 9,
+            "Cyan": 0,
+            "Magenta": 17,
+            "Pink": 28,
+            "Turquoise": 1,
+            "Lime": 0,
+            "Purple": 13,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 10,
+        },
+    ],
+    "goblin_machine": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 35,
+            "Violet": 3,
+            "Cyan": 0,
+            "Magenta": 23,
+            "Pink": 11,
+            "Turquoise": 2,
+            "Lime": 0,
+            "Purple": 7,
+            "Brown": 0,
+            "Teal": 18,
+            "Maroon": 1,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 16,
+            "Violet": 2,
+            "Cyan": 0,
+            "Magenta": 38,
+            "Pink": 14,
+            "Turquoise": 2,
+            "Lime": 0,
+            "Purple": 9,
+            "Brown": 0,
+            "Teal": 10,
+            "Maroon": 8,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 24,
+            "Violet": 18,
+            "Cyan": 0,
+            "Magenta": 6,
+            "Pink": 13,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 22,
+            "Brown": 8,
+            "Teal": 0,
+            "Maroon": 9,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 26,
+            "Violet": 10,
+            "Cyan": 0,
+            "Magenta": 16,
+            "Pink": 28,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 9,
+            "Brown": 5,
+            "Teal": 0,
+            "Maroon": 6,
+        },
+    ],
+    "skeleton_dragons": [
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 16,
+            "Violet": 3,
+            "Cyan": 0,
+            "Magenta": 25,
+            "Pink": 18,
+            "Turquoise": 10,
+            "Lime": 0,
+            "Purple": 7,
+            "Brown": 6,
+            "Teal": 13,
+            "Maroon": 2,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 0,
+            "Blue": 0,
+            "Indigo": 12,
+            "Violet": 5,
+            "Cyan": 0,
+            "Magenta": 40,
+            "Pink": 33,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 4,
+            "Brown": 2,
+            "Teal": 0,
+            "Maroon": 4,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 2,
+            "Blue": 0,
+            "Indigo": 25,
+            "Violet": 21,
+            "Cyan": 0,
+            "Magenta": 2,
+            "Pink": 17,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 21,
+            "Brown": 4,
+            "Teal": 0,
+            "Maroon": 8,
+        },
+        {
+            "Red": 0,
+            "Orange": 0,
+            "Yellow": 0,
+            "Green": 1,
+            "Blue": 0,
+            "Indigo": 23,
+            "Violet": 15,
+            "Cyan": 0,
+            "Magenta": 12,
+            "Pink": 29,
+            "Turquoise": 0,
+            "Lime": 0,
+            "Purple": 9,
+            "Brown": 0,
+            "Teal": 0,
+            "Maroon": 11,
+        },
+    ],
+}
+
 # card image stuff
 
 toplefts = [
@@ -11504,11 +11514,36 @@ HALF_HEIGHT = int(TOTAL_HEIGHT / 2)
 
 # color stuff
 CARD_MATCH_THRESHOLD = 1000
+# Margin rule: a best match above CARD_MATCH_THRESHOLD is still accepted when it is within
+# CARD_MATCH_SOFT_THRESHOLD and the nearest card with a *different* base id is at least
+# CARD_MATCH_MIN_RATIO times further away. Degraded crops (dimmed / greyed) must stay UNKNOWN:
+# UNKNOWN is always preferred over a misread. With the dy/dx search below, a ratio of 1.4 let
+# dimmed+raised crops through (graveyard at 1.42) and a fully grey crop read as giant_skeleton
+# (1.47); 1.5 plus the chroma floor gave 0 wrong reads over a 4320-crop gain/desaturation/shift
+# sweep of the regression fixture.
+CARD_MATCH_SOFT_THRESHOLD = 1600
+CARD_MATCH_MIN_RATIO = 1.5
+# Soft (ratio) accepts need a coloured crop: mean per-pixel (max-min channel) of the slot crop.
+# Live cards measure ~74-90; a greyed-out card is near 0. Hard accepts are unaffected.
+CARD_SOFT_MIN_CHROMA = 20.0
 
-# Spirit Empress hand art switches between ground/air by elixir; match either variant.
+# Search window for a raised (selected) card and emulator drift: the slot crop is also matched
+# at these offsets and the minimum distance per card is kept.
+SLOT_SEARCH_DY = (-12, 0)
+SLOT_SEARCH_DX = (-2, 2)
+
+# Several fingerprints may belong to one card: give each variant its own card_color_data key
+# and map it here. The Spirit Empress hand art switches between ground/air by elixir.
 CARD_DETECTION_ALIASES: dict[str, str] = {
     "spirit_empress_air": "spirit_empress",
     "spirit_empress_ground": "spirit_empress",
+    # Only the charged evolution art has a fingerprint; report it as the deck card.
+    "evo_furnace": "furnace",
+    # Reserved variant keys, to be filled from captured hand crops (see hand_crop_sink):
+    # the evo-slot art while charging and the evo-ready art.
+    "furnace_evo_charging": "furnace",
+    "lumberjack_evo_ready": "lumberjack",
+    "royal_ghost_evo_ready": "royal_ghost",
 }
 
 COLORS = {
@@ -11532,6 +11567,9 @@ COLORS = {
 
 COLORS_ARRAY = numpy.array(list(COLORS.values()))
 COLORS_KEYS = list(COLORS.keys())
+_N_COLORS = len(COLORS_KEYS)
+_COLORS_F32 = COLORS_ARRAY.astype(numpy.float32)
+_COLORS_SQ = (_COLORS_F32**2).sum(axis=1)[None, :]
 
 # Pre-compute numpy arrays for each card's corner data
 # Build a fresh dict with the transformed values
@@ -11547,6 +11585,43 @@ card_color_data: dict[str, list[numpy.ndarray[tuple[int, ...], numpy.dtype[numpy
 )
 
 
+def base_card_id(card_id: str) -> str:
+    """Deck identity of a fingerprint key: alias, then strip evo_/hero_ (as battle_brain._base_card_id)."""
+    card_id = CARD_DETECTION_ALIASES.get(card_id, card_id)
+    for prefix in ("evo_", "hero_"):
+        if card_id.startswith(prefix):
+            return card_id[len(prefix) :]
+    return card_id
+
+
+# Precomputed matcher DB, built lazily from card_color_data.
+_DB_NAMES: list[str] = []
+_DB: numpy.ndarray | None = None  # (N, 4, 16) int32
+_DB_BASE: numpy.ndarray | None = None  # (N,) int base-id codes
+
+
+def _get_db() -> tuple[list[str], numpy.ndarray, numpy.ndarray]:
+    global _DB, _DB_BASE, _DB_NAMES
+    if _DB is None or _DB_BASE is None or len(_DB_NAMES) != len(card_color_data):
+        names = list(card_color_data)
+        _DB = numpy.stack([numpy.asarray(card_color_data[n], dtype=numpy.int32) for n in names])
+        codes: dict[str, int] = {}
+        _DB_BASE = numpy.array([codes.setdefault(base_card_id(n), len(codes)) for n in names], dtype=numpy.int32)
+        _DB_NAMES = names
+    return _DB_NAMES, _DB, _DB_BASE
+
+
+_DB_F32: numpy.ndarray | None = None
+
+
+def _get_db_f32() -> numpy.ndarray:
+    global _DB_F32
+    _names, db, _bases = _get_db()
+    if _DB_F32 is None or len(_DB_F32) != len(db):
+        _DB_F32 = db.reshape(len(db), -1).astype(numpy.float32)
+    return _DB_F32
+
+
 def calculate_offset(card_name, card_data, collected_data_array):
     total_offset = 0
     for i, corner_data_array in enumerate(card_data):
@@ -11555,37 +11630,59 @@ def calculate_offset(card_name, card_data, collected_data_array):
     return card_name, total_offset
 
 
-def find_closest_card(collected_data):
-    best_card = None
-    best_offset = CARD_MATCH_THRESHOLD + 1
-    # Debug offsets disabled in production
-    debug_offsets = None
+def _as_hist_array(collected_data) -> numpy.ndarray:
+    """(4, 16) int32 from a list of 4 colour->count dicts (get_all_pixel_data) or an array."""
+    if isinstance(collected_data, numpy.ndarray):
+        return collected_data.astype(numpy.int32, copy=False).reshape(4, _N_COLORS)
+    rows = [list(c.values()) if isinstance(c, dict) else list(c) for c in collected_data]
+    return numpy.array(rows, dtype=numpy.int32)
 
-    collected_data_array = numpy.array(
-        [list(corner.values()) for corner in collected_data],
+
+def _decide(dists: numpy.ndarray, allow_soft: bool = True) -> tuple[str, int, int, list[tuple[str, int]]]:
+    """Accept/reject from per-card distances (N,). Returns (card or UNKNOWN, best, second, top3)."""
+    names, _db, bases = _get_db()
+    order = numpy.argsort(dists, kind="stable")
+    best_i = int(order[0])
+    best = int(dists[best_i])
+    other = dists[bases != bases[best_i]]
+    second = int(other.min()) if other.size else best
+    top3 = [(names[int(i)], int(dists[int(i)])) for i in order[:3]]
+    accept = best <= CARD_MATCH_THRESHOLD or (
+        allow_soft and best <= CARD_MATCH_SOFT_THRESHOLD and second >= CARD_MATCH_MIN_RATIO * best
     )
+    return (names[best_i] if accept else "UNKNOWN"), best, second, top3
 
-    for card_name, card_data in card_color_data.items():
-        card_name, total_offset = calculate_offset(  # noqa: PLW2901
-            card_name,
-            card_data,
-            collected_data_array,
-        )
-        if total_offset < best_offset:
-            best_offset = total_offset
-            best_card = card_name
-        if debug_offsets is not None:
-            debug_offsets.append((card_name, total_offset))
 
-    # Debugging output removed from production.
+def find_closest_card_scored(collected_data) -> tuple[str, int, int, list[tuple[str, int]]]:
+    """Match corner histograms against the DB.
 
-    if best_offset > CARD_MATCH_THRESHOLD:
-        return "UNKNOWN"
+    Returns ``(card, best, second, top3)``: ``card`` is the raw fingerprint key (apply
+    CARD_DETECTION_ALIASES for the deck id) or ``"UNKNOWN"``; ``best`` is its L1 distance;
+    ``second`` is the best distance among cards with a different base id; ``top3`` lists the
+    three nearest ``(key, distance)`` pairs.
+    """
+    _names, db, _bases = _get_db()
+    x = _as_hist_array(collected_data)
+    dists = numpy.abs(db - x[None]).sum(axis=(1, 2))
+    return _decide(dists)
 
-    return best_card
+
+def find_closest_card(collected_data) -> str:
+    return find_closest_card_scored(collected_data)[0]
 
 
 # identification methods
+def _label_pixels(pixels: numpy.ndarray) -> numpy.ndarray:
+    """Nearest COLORS index for each pixel of an (..., 3) array (Euclidean, as before).
+
+    argmin |p-c|^2 == argmin (|c|^2 - 2 p.c); every term is an integer below 2^24, so the
+    float32 matmul is exact and ties resolve to the same (first) colour as the old norm.
+    """
+    flat = pixels.reshape(-1, 3).astype(numpy.float32)
+    labels = numpy.argmin(_COLORS_SQ - 2.0 * (flat @ _COLORS_F32.T), axis=1)
+    return labels.reshape(pixels.shape[:-1])
+
+
 def make_pixel_dict_from_color_list(color_list):
     # Initialize the pixel_dict with zeros
     pixel_dict = dict.fromkeys(COLORS.keys(), 0)
@@ -11600,48 +11697,96 @@ def make_pixel_dict_from_color_list(color_list):
 
 
 def color_from_pixel(pixels):
-    # Calculate the Euclidean distance between the pixels and each color
-    distances = numpy.linalg.norm(COLORS_ARRAY - pixels[:, None], axis=2)
+    return [COLORS_KEYS[i] for i in _label_pixels(numpy.asarray(pixels)).ravel()]
 
-    # Find the color with the minimum distance for each pixel
-    closest_colors = [COLORS_KEYS[i] for i in numpy.argmin(distances, axis=1)]
 
-    return closest_colors
+def _hist_dict(labels: numpy.ndarray) -> dict[str, int]:
+    counts = numpy.bincount(labels.ravel(), minlength=_N_COLORS)
+    return {k: int(v) for k, v in zip(COLORS_KEYS, counts, strict=True)}
 
 
 def get_corner_pixels(x_range, y_range, iar):
-    # Get all pixels in the range
-    pixels = iar[y_range[0] : y_range[1], x_range[0] : x_range[1]].reshape(-1, 3)
+    return _hist_dict(_label_pixels(iar[y_range[0] : y_range[1], x_range[0] : x_range[1]]))
 
-    # Get the color for each pixel
-    colors = color_from_pixel(pixels)
 
-    return make_pixel_dict_from_color_list(colors)
+def slot_histograms(iar, chosen_card_index: int) -> numpy.ndarray:
+    """(4, 16) corner histograms of a hand slot at its canonical position."""
+    x, y = toplefts[chosen_card_index]
+    labels = _label_pixels(iar[y : y + TOTAL_HEIGHT, x : x + TOTAL_WIDTH])
+    out = numpy.empty((4, _N_COLORS), dtype=numpy.int32)
+    for c, (r0, c0) in enumerate(((0, 0), (0, HALF_WIDTH), (HALF_HEIGHT, 0), (HALF_HEIGHT, HALF_WIDTH))):
+        out[c] = numpy.bincount(labels[r0 : r0 + HALF_HEIGHT, c0 : c0 + HALF_WIDTH].ravel(), minlength=_N_COLORS)
+    return out
 
 
 def get_all_pixel_data(emulator, chosen_card_index):
-    topleft = toplefts[chosen_card_index]
+    assert battle_iar is not None, "battle_iar must be set before calling get_all_pixel_data()"
+    hists = slot_histograms(battle_iar, chosen_card_index)
+    return [{k: int(v) for k, v in zip(COLORS_KEYS, row, strict=True)} for row in hists]
 
-    corners = [
-        ((topleft[0], topleft[0] + HALF_WIDTH), (topleft[1], topleft[1] + HALF_HEIGHT)),
-        (
-            (topleft[0] + HALF_WIDTH, topleft[0] + TOTAL_WIDTH),
-            (topleft[1], topleft[1] + HALF_HEIGHT),
-        ),
-        (
-            (topleft[0], topleft[0] + HALF_WIDTH),
-            (topleft[1] + HALF_HEIGHT, topleft[1] + TOTAL_HEIGHT),
-        ),
-        (
-            (topleft[0] + HALF_WIDTH, topleft[0] + TOTAL_WIDTH),
-            (topleft[1] + HALF_HEIGHT, topleft[1] + TOTAL_HEIGHT),
-        ),
-    ]
 
-    color_list = [get_corner_pixels(*corner, battle_iar) for corner in corners]
+_ONE_HOT = numpy.eye(_N_COLORS, dtype=numpy.int32)
 
-    # print(f"card_name: {color_list},")
-    return color_list
+
+def _shifted_slot_histograms(iar, chosen_card_index: int) -> numpy.ndarray:
+    """(S, 4, 16) corner histograms of a slot at every (dy, dx) in the search window.
+
+    Labels the padded slot region once and reads each corner from a per-colour integral
+    image, so the whole window costs about as much as one crop.
+    """
+    x, y = toplefts[chosen_card_index]
+    h, w = iar.shape[:2]
+    y0 = max(0, y + SLOT_SEARCH_DY[0])
+    y1 = min(h, y + TOTAL_HEIGHT + SLOT_SEARCH_DY[1])
+    x0 = max(0, x + SLOT_SEARCH_DX[0])
+    x1 = min(w, x + TOTAL_WIDTH + SLOT_SEARCH_DX[1])
+    labels = _label_pixels(iar[y0:y1, x0:x1])
+    integral = numpy.zeros((labels.shape[0] + 1, labels.shape[1] + 1, _N_COLORS), dtype=numpy.int32)
+    integral[1:, 1:] = _ONE_HOT[labels].cumsum(axis=0).cumsum(axis=1)
+
+    dys, dxs = _search_offsets(y - y0, x - x0, labels.shape)
+    corner_r = numpy.array([0, 0, HALF_HEIGHT, HALF_HEIGHT])
+    corner_c = numpy.array([0, HALF_WIDTH, 0, HALF_WIDTH])
+    r0 = dys[:, None] + corner_r[None]  # (S, 4)
+    c0 = dxs[:, None] + corner_c[None]
+    r1 = r0 + HALF_HEIGHT
+    c1 = c0 + HALF_WIDTH
+    return integral[r1, c1] - integral[r0, c1] - integral[r1, c0] + integral[r0, c0]
+
+
+def _search_offsets(base_r: int, base_c: int, shape: tuple[int, ...]) -> tuple[numpy.ndarray, numpy.ndarray]:
+    """Local top-left rows/cols for every in-bounds search offset; offset (0, 0) comes first."""
+    rows, cols = [base_r], [base_c]
+    for dy in range(SLOT_SEARCH_DY[0], SLOT_SEARCH_DY[1] + 1):
+        for dx in range(SLOT_SEARCH_DX[0], SLOT_SEARCH_DX[1] + 1):
+            r, c = base_r + dy, base_c + dx
+            if (dy or dx) and r >= 0 and c >= 0 and r + TOTAL_HEIGHT <= shape[0] and c + TOTAL_WIDTH <= shape[1]:
+                rows.append(r)
+                cols.append(c)
+    return numpy.array(rows), numpy.array(cols)
+
+
+def _match_slot(iar, slot: int) -> tuple[str, int, int, list[tuple[str, int]], numpy.ndarray]:
+    """Scored match of one hand slot with the dy/dx search. Last item: canonical (4, 16) histograms."""
+    _names, db, _bases = _get_db()
+    hists = _shifted_slot_histograms(iar, slot)  # (S, 4, 16)
+    # L1 for every (offset, card) pair in C++; integer sums < 2^24 stay exact in float32.
+    # With K=N OpenCV returns each row sorted, so scatter it back to card order.
+    db_f32 = _get_db_f32()
+    sorted_d, idx = cv2.batchDistance(
+        hists.reshape(len(hists), -1).astype(numpy.float32), db_f32, cv2.CV_32F, normType=cv2.NORM_L1, K=len(db_f32)
+    )
+    pair = numpy.empty_like(sorted_d)
+    numpy.put_along_axis(pair, numpy.asarray(idx, dtype=numpy.intp), sorted_d, axis=1)
+    dists = pair.min(axis=0).astype(numpy.int64)  # (N,)
+    card, best, second, top3 = _decide(dists, allow_soft=_slot_chroma(iar, slot) >= CARD_SOFT_MIN_CHROMA)
+    return card, best, second, top3, hists[0]
+
+
+def _slot_chroma(iar, slot: int) -> float:
+    x, y = toplefts[slot]
+    crop = iar[y : y + TOTAL_HEIGHT, x : x + TOTAL_WIDTH]
+    return float((crop.max(axis=2).astype(numpy.int16) - crop.min(axis=2)).mean())
 
 
 purple_color = numpy.array([255, 43, 227])
@@ -11666,43 +11811,45 @@ card_coords = [
 play_side = "left"
 battle_iar: numpy.ndarray[tuple[int, ...], numpy.dtype[numpy.uint8]] | None = None
 
+_ABILITY_PIXELS = ((462, 324), (453, 334), (462, 336))
+_ABILITY_COLORS = numpy.array(
+    [
+        [215, 28, 223],
+        [240, 39, 254],
+        [239, 40, 251],
+    ],
+)
+
+
+def hero_ability_ready(iar) -> bool:
+    """True when the Hero/Champion ability button is lit in this frame."""
+    pixels = numpy.array([iar[r][c] for r, c in _ABILITY_PIXELS], dtype=numpy.int32)
+    return bool(numpy.any(numpy.all(numpy.abs(_ABILITY_COLORS[None] - pixels[:, None]) <= 30, axis=-1)))
+
 
 def is_hero_champion_ability_visible(emulator) -> bool:
-    iar = emulator.screenshot()
-    pixels = numpy.array([iar[462][324], iar[453][334], iar[462][336]])
-    colors = numpy.array(
-        [
-            [215, 28, 223],
-            [240, 39, 254],
-            [239, 40, 251],
-        ],
-    )
+    return hero_ability_ready(emulator.screenshot())
 
-    for p in pixels:
-        if numpy.any(numpy.all(numpy.abs(colors - p) <= 30, axis=1)):
-            return True
 
-    return False
+def cards_available(iar, check_side: bool = False) -> list[int]:
+    """Hand slots showing the purple elixir drop (affordable). check_side also updates play_side."""
+    if check_side:
+        global play_side
+        _, play_side = _bridge_activity(iar)
+
+    card_exists_list = []
+    for i, (x_coords, y_coords) in enumerate(card_coords):
+        iar_pixels = iar[numpy.ix_(y_coords, x_coords)].astype(numpy.int32)
+        purple_pixels = numpy.all(numpy.abs(iar_pixels - purple_color) <= 30, axis=-1)
+        if numpy.sum(purple_pixels) >= 26:
+            card_exists_list.append(i)
+    return card_exists_list
 
 
 def check_which_cards_are_available(emulator, check_side=False):
     global battle_iar
     battle_iar = emulator.screenshot()
-    card_exists_list = []
-
-    if check_side:
-        global play_side
-        _, play_side = switch_side()
-
-    for i, coords in enumerate(card_coords):
-        x_coords, y_coords = coords
-        iar_pixels = battle_iar[numpy.ix_(y_coords, x_coords)]
-        purple_pixels = numpy.all(numpy.abs(iar_pixels - purple_color) <= 30, axis=-1)
-        count = numpy.sum(purple_pixels)
-        if count >= 26:
-            card_exists_list.append(i)
-
-    return card_exists_list
+    return cards_available(battle_iar, check_side)
 
 
 def trigger_hero_champion_ability(emulator, logger) -> None:
@@ -11711,9 +11858,40 @@ def trigger_hero_champion_ability(emulator, logger) -> None:
 
 
 def identify_hand_cards(emulator, card_index):
-    color_chosen_card = get_all_pixel_data(emulator, card_index)
-    card_id = find_closest_card(color_chosen_card)
+    assert battle_iar is not None, "battle_iar must be set before calling identify_hand_cards()"
+    card_id = _match_slot(battle_iar, card_index)[0]
     return CARD_DETECTION_ALIASES.get(card_id, card_id)
+
+
+def identify_hand_cards_scored(iar=None, slots=(0, 1, 2, 3)) -> list[tuple[int, str, int, int]]:
+    """Identify hand slots (affordable or not) with scores: ``[(slot, card, best, second), ...]``.
+
+    Uses ``iar`` (and sets battle_iar to it) or the current battle_iar. ``card`` is the deck id
+    (aliases applied) or ``"UNKNOWN"``; UNKNOWN slots in colour (not greyed) are queued to
+    hand_crop_sink for labelling.
+    """
+    global battle_iar
+    if iar is not None:
+        battle_iar = iar
+    frame = battle_iar
+    assert frame is not None, "pass a frame or set battle_iar before identify_hand_cards_scored()"
+    results = []
+    for slot in slots:
+        card, best, second, top3, hists = _match_slot(frame, slot)
+        # Greyed (unaffordable) slots are desaturated and would only fill the sink with noise.
+        if card == "UNKNOWN" and _slot_chroma(frame, slot) >= CARD_SOFT_MIN_CHROMA:
+            _save_unknown_crop(frame, slot, hists, top3)
+        results.append((slot, CARD_DETECTION_ALIASES.get(card, card), best, second))
+    return results
+
+
+def _save_unknown_crop(iar, slot, hists, top3) -> None:
+    try:
+        from pyclashbot.bot import hand_crop_sink  # lazy: keeps recorder deps out of import
+
+        hand_crop_sink.save(iar, slot, toplefts[slot], hists, top3)
+    except Exception:  # crop capture must never break a battle
+        pass
 
 
 # Create the reverse lookup dictionary
@@ -11776,28 +11954,37 @@ def create_default_bridge_iar(emulator):
 
 
 bridge_pixel = [[100, 200], [275, 200]]
+# (rows, cols) slices of the two bridge regions: 175 rows x 40 cols from each bridge_pixel.
+_BRIDGE_SLICES = tuple((slice(y, y + 175), slice(x, x + 40)) for x, y in bridge_pixel)
+# Per-channel differences up to this size are compression/render noise, not units.
+BRIDGE_NOISE_DEADBAND = 8
+
+
+def _bridge_activity(iar) -> tuple[float, str]:
+    """(activity, busier side) of ``iar`` against the reference bridge_iar."""
+    assert bridge_iar is not None, "bridge_iar must be set before calling switch_side()"
+    offsets = []
+    for rows, cols in _BRIDGE_SLICES:
+        # int16 difference: uint8 subtraction wrapped -1 to 255 and turned noise into "activity".
+        diff = numpy.abs(iar[rows, cols].astype(numpy.int16) - bridge_iar[rows, cols].astype(numpy.int16))
+        diff[diff <= BRIDGE_NOISE_DEADBAND] = 0
+        offsets.append(float(numpy.sqrt(numpy.square(diff, dtype=numpy.float64).sum())))
+
+    if offsets[0] > offsets[1]:
+        return offsets[0], "left"
+    return offsets[1], "right"
 
 
 def switch_side():
     assert battle_iar is not None, "battle_iar must be set before calling switch_side()"
-    assert bridge_iar is not None, "bridge_iar must be set before calling switch_side()"
-    bridge_color_offset = []
-    for i, bridge in enumerate(bridge_pixel):
-        all_coords = [(y, x) for x in range(bridge[0], bridge[0] + 40) for y in range(bridge[1], bridge[1] + 175)]
-        pixel_coords = numpy.array(all_coords)
-        iar_pixels = battle_iar[pixel_coords[:, 0], pixel_coords[:, 1]]
-        bridge_iar_pixels = bridge_iar[pixel_coords[:, 0], pixel_coords[:, 1]]
-        bridge_color_offset.append(numpy.linalg.norm(iar_pixels - bridge_iar_pixels))
-
-    if bridge_color_offset[0] > bridge_color_offset[1]:
-        return bridge_color_offset[0], "left"
-    return bridge_color_offset[1], "right"
+    return _bridge_activity(battle_iar)
 
 
 if __name__ == "__main__":
-    all_data = get_all_pixel_data(12, 0)
-    for data in all_data:
-        id = find_closest_card(data)
-        if id == "UNKNOWN":
-            print(data)
-        print(id)
+    import sys
+
+    import cv2
+
+    frame = cv2.imread(sys.argv[1])
+    for slot, card, best, second in identify_hand_cards_scored(frame):
+        print(slot, card, best, second)
