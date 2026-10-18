@@ -224,6 +224,13 @@ JOBS = [
         },
     ),
     JobConfig(
+        UIField.DEBUG_VIEW_USER_TOGGLE,
+        "🔍 Debug view",
+        default=False,
+        tooltip="During smart battles, save an annotated frame of what the bot sees (units, hand reads, "
+        "elixir, chosen play) and show it live in a debug window.",
+    ),
+    JobConfig(
         UIField.RANDOM_PLAYS_USER_TOGGLE,
         "❔ Random card plays",
         default=False,

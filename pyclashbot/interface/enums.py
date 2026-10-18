@@ -55,6 +55,7 @@ class UIField(StrEnum):
     RANDOM_PLAYS_USER_TOGGLE = "random_plays_user_toggle"
     SMART_BATTLE_USER_TOGGLE = "smart_battle_user_toggle"
     DECK_HERO_CARD = "deck_hero_card"
+    DEBUG_VIEW_USER_TOGGLE = "debug_view_user_toggle"
     DISABLE_WIN_TRACK_TOGGLE = "disable_win_track_toggle"
     RECORD_FIGHTS_TOGGLE = "record_fights_toggle"
     RECORDING_FOLDER_PATH = "recording_folder_path"

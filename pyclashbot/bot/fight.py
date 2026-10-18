@@ -3,6 +3,7 @@
 import collections
 import inspect
 import json
+import logging
 import os
 import random
 import time
@@ -12,6 +13,7 @@ from typing import Any, Literal
 import numpy
 
 from pyclashbot.bot import card_detection, state_detect
+from pyclashbot.bot import debug_view as debug_frames
 from pyclashbot.bot.battle_brain import BattleBrain, card_cost, normalize_hero_card
 from pyclashbot.bot.card_detection import (
     check_which_cards_are_available,
@@ -138,10 +140,12 @@ def do_fight_state(
     custom_path: str | None = None,
     smart_battle: bool = False,
     hero_card: str | None = None,
+    debug_view: bool = False,
 ) -> bool:
     """Handle the entirety of a battle state (start fight, do fight, end fight).
 
     ``hero_card`` is the deck setting for the card the hand reader can't see (e.g. ``hero_balloon``).
+    ``debug_view`` publishes an annotated frame per smart-battle decision (see ``debug_view.py``).
     """
 
     logger.change_status("Waiting for battle to start")
@@ -159,7 +163,16 @@ def do_fight_state(
     # Run regular fight loop if random mode not toggled
     if (
         not random_fight_mode
-        and _fight_loop(emulator, logger, recording_flag, fight_mode_chosen, custom_path, smart_battle, hero_card)
+        and _fight_loop(
+            emulator,
+            logger,
+            recording_flag,
+            fight_mode_chosen,
+            custom_path,
+            smart_battle,
+            hero_card,
+            debug_view=debug_view,
+        )
         is False
     ):
         logger.change_status("Fight loop failed")
@@ -373,12 +386,20 @@ def _brain_record(brain, play, deployed: bool) -> None:
         brain.record(play)
 
 
-def _identify_hand(emulator, iar, available: list[int]) -> tuple[dict[int, str], dict[int, str] | None]:
-    """(playable hand, full 4-slot hand or None). Uses identify_hand_cards_scored when present."""
+def _identify_hand(
+    emulator, iar, available: list[int], scores_out: list | None = None
+) -> tuple[dict[int, str], dict[int, str] | None]:
+    """(playable hand, full 4-slot hand or None). Uses identify_hand_cards_scored when present.
+
+    ``scores_out`` (optional) receives the raw ``(slot, card, best, second)`` entries.
+    """
     scored = getattr(card_detection, "identify_hand_cards_scored", None)
     if callable(scored):
         try:
-            full = {int(entry[0]): str(entry[1]) for entry in scored(iar, slots=(0, 1, 2, 3))}
+            entries = list(scored(iar, slots=(0, 1, 2, 3)))
+            full = {int(entry[0]): str(entry[1]) for entry in entries}
+            if scores_out is not None:
+                scores_out.extend(entries)
             return {i: full[i] for i in available if i in full}, full
         except Exception:
             pass  # fall back to the per-slot matcher
@@ -423,13 +444,15 @@ class AbilityTrigger:
         self.misses = 0  # consecutive unlit frames
         self.last_fired = -1e9
         self.fired = 0
+        self.last_ready = False  # last frame's read, for the debug view
 
     def tick(self, emulator, logger, iar, now: float, enemy_on_our_half: bool | None) -> bool:
         """Feed one frame; tap the ability if due. ``enemy_on_our_half`` None = don't gate on enemies.
 
         Call between card plays only (never between the two taps of a play).
         """
-        if not _hero_ability_ready(iar):
+        self.last_ready = _hero_ability_ready(iar)
+        if not self.last_ready:
             self.hits = 0
             self.misses += 1
             if self.misses >= ABILITY_MISSES_TO_RESET:
@@ -507,8 +530,10 @@ def _units_json(units) -> list[dict]:
 class FightContext:
     """State shared by every tick of one fight: debounce, ability, pending play, logs."""
 
-    def __init__(self, brain=None, decision_log: DecisionLog | None = None) -> None:
+    def __init__(self, brain=None, decision_log: DecisionLog | None = None, debug_sink=None) -> None:
         self.brain = brain
+        self.debug_sink = debug_sink  # debug_view.DebugFrameSink when the debug view is on
+        self.debug_failed = False
         self.ability = AbilityTrigger()
         self.started_at = time.monotonic()
         self.last_in_battle_at = self.started_at
@@ -673,6 +698,47 @@ class FightContext:
                 "tick_s": round(now - tick_start, 3),
             }
         )
+
+    def publish_debug(
+        self,
+        frame: TickFrame,
+        tick_start: float,
+        *,
+        scores=(),
+        hand=None,
+        threats=None,
+        towers=None,
+        play=None,
+        phase: str | None = None,
+    ) -> None:
+        """Hand this tick's already-computed values to the debug view. Never raises; logs once."""
+        if self.debug_sink is None:
+            return
+        try:
+            now = time.monotonic()
+            info = debug_frames.build_debug_info(
+                elixir=frame.elixir,
+                available=frame.available,
+                scores=scores,
+                hand=hand,
+                enemies=frame.enemies if threats is None else threats,
+                friends=frame.friends,
+                threat=frame.threat,
+                towers_raw=towers,
+                brain=self.brain,
+                ability_ready=self.ability.last_ready,
+                play=play,
+                tick_ms=(now - tick_start) * 1000,
+                frame_age_ms=(now - frame.captured_at) * 1000,
+                phase=phase,
+                elapsed=self.match_clock(frame.captured_at),
+                in_battle=frame.in_battle,
+            )
+            self.debug_sink.submit(frame.iar, info)
+        except Exception as exc:  # the debug view must never break a battle
+            if not self.debug_failed:
+                self.debug_failed = True
+                logging.getLogger(__name__).warning("Debug view: could not publish a frame: %s", exc)
 
     def log_end(self, outcome: str) -> None:
         if self.decision_log is None:
@@ -1010,19 +1076,22 @@ def play_smart_card(
     if not card_indices:
         if ctx is not None:
             ctx.repeat_status(logger, "No cards ready yet...", frame.captured_at)
+            ctx.publish_debug(frame, tick_start, phase=battle_strategy.get_battle_phase())
         else:
             logger.change_status("No cards ready yet...")
         return False
 
     iar = frame.iar
-    read_hand, full_hand = _identify_hand(emulator, iar, card_indices)
+    scores: list = []
+    read_hand, full_hand = _identify_hand(emulator, iar, card_indices, scores)
     hand = read_hand
     if ctx is not None:
         # A slot backing off after a failed deploy stays affordable for the deck tracker but isn't played.
         hand = {i: c for i, c in read_hand.items() if not ctx.slot_blocked(i, frame.captured_at)}
     threats = classify_units(iar, frame.enemies)
     friends = frame.friends
-    brain.observe_towers(read_tower_health(iar))
+    towers = read_tower_health(iar)
+    brain.observe_towers(towers)
     elapsed = battle_strategy.get_elapsed_time()
     if recording_flag:
         log_units(iar, threats, elapsed)
@@ -1030,6 +1099,16 @@ def play_smart_card(
     play = _brain_choose(brain, hand, threats, elapsed, frame.elixir, friends, clock, full_hand, set(read_hand))
     if ctx is not None:
         ctx.log_decision(frame, read_hand, full_hand, threats, play, tick_start)
+        ctx.publish_debug(
+            frame,
+            tick_start,
+            scores=scores,
+            hand=full_hand if full_hand is not None else read_hand,
+            threats=threats,
+            towers=towers,
+            play=play,
+            phase=battle_strategy.get_battle_phase(),
+        )
     if play is None:
         if ctx is not None:
             ctx.repeat_status(logger, f"Holding — {brain.situation}", frame.captured_at)
@@ -1124,6 +1203,16 @@ class BattleStrategy:
         return self.phase_thresholds[phase]
 
 
+def _debug_sink(enabled: bool):
+    """The debug-view frame sink when enabled (smart battles only), else None. Never raises."""
+    if not enabled:
+        return None
+    try:
+        return debug_frames.get_sink()
+    except Exception:
+        return None
+
+
 def _fight_loop(
     emulator,
     logger: Logger,
@@ -1132,6 +1221,7 @@ def _fight_loop(
     custom_path: str | None = None,
     smart_battle: bool = False,
     hero_card: str | None = None,
+    debug_view: bool = False,
 ) -> bool:
     """Method for handling dynamically timed fight"""
     create_default_bridge_iar(emulator)
@@ -1151,7 +1241,9 @@ def _fight_loop(
         logger.log(f"Smart battle AI on — opening in the {brain.attack_lane} lane")
         if hero_card:
             logger.log(f"Deck hero card: {hero_card} (unreadable hand slots may be it)")
-    ctx = FightContext(brain, DecisionLog() if brain is not None else None)
+    ctx = FightContext(
+        brain, DecisionLog() if brain is not None else None, _debug_sink(debug_view and brain is not None)
+    )
 
     while True:
         # Preamble: wait for elixir (one frame per iteration; ability + battle-end handled per frame).

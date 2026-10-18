@@ -334,7 +334,7 @@ def test_do_fight_state_forwards_the_hero(monkeypatch):
 
     seen: list[tuple] = []
     monkeypatch.setattr(fight, "wait_for_battle_start", lambda *a: True)
-    monkeypatch.setattr(fight, "_fight_loop", lambda *a: seen.append(a) or False)
+    monkeypatch.setattr(fight, "_fight_loop", lambda *a, **_k: seen.append(a) or False)
     logger: Any = _Logger()
     fight.do_fight_state(None, logger, False, "Classic 1v1", smart_battle=True, hero_card=HERO)
     assert seen and seen[0][-1] == HERO

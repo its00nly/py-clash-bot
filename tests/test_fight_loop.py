@@ -480,3 +480,74 @@ def test_wait_answers_a_deep_threat_immediately(env, monkeypatch):
 
     assert fight.wait_for_elixir(emulator, _Logger(), 8, brain=brain) is True
     assert emulator.shots == 1
+
+
+# ---- debug view ----------------------------------------------------------------
+
+
+class _FakeSink:
+    def __init__(self) -> None:
+        self.frames: list[tuple[Any, dict]] = []
+
+    def submit(self, iar, info) -> bool:
+        self.frames.append((iar, info))
+        return True
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_fight_loop_publishes_debug_frames_only_when_enabled(env, monkeypatch, enabled):
+    clock, _, _ = env
+    sink = _FakeSink()
+    monkeypatch.setattr(fight.debug_frames, "get_sink", lambda: sink)
+    emulator = _Emulator(clock, lambda n: _Spec(in_battle=n < 12))
+    brain = _Brain(emulator, play=True)
+    monkeypatch.setattr(fight, "BattleBrain", lambda: brain)
+    logger: Any = _Logger()
+
+    fight._fight_loop(emulator, logger, False, "Classic 1v1", None, smart_battle=True, debug_view=enabled)
+    if not enabled:
+        assert sink.frames == []
+        return
+    assert sink.frames
+    shots = emulator.shots
+    assert len(sink.frames) <= shots  # never more than one publish per screenshot (no extra captures)
+    _iar, info = sink.frames[0]
+    assert info["elixir"] == 5 and info["play"]["card"] == "knight"
+    assert [row["card"] for row in info["hand"]] == list(HAND.values())
+
+
+def test_debug_view_errors_never_reach_the_fight(env, monkeypatch):
+    clock, _, _ = env
+
+    class _Boom:
+        def submit(self, iar, info):
+            raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(fight.debug_frames, "get_sink", lambda: _Boom())
+    emulator = _Emulator(clock, lambda n: _Spec(in_battle=n < 12))
+    brain = _Brain(emulator, play=True)
+    monkeypatch.setattr(fight, "BattleBrain", lambda: brain)
+    logger: Any = _Logger()
+    assert fight._fight_loop(emulator, logger, False, "Classic 1v1", None, smart_battle=True, debug_view=True)
+    assert brain.records  # plays still happened
+
+
+class _StopLoopError(Exception):
+    pass
+
+
+@pytest.mark.parametrize(("smart", "expected"), [(False, None), (True, "sink")])
+def test_debug_view_only_for_smart_battles(env, monkeypatch, smart, expected):
+    seen: list[Any] = []
+
+    def ctx_factory(brain, decision_log, debug_sink=None):
+        seen.append(debug_sink)
+        raise _StopLoopError
+
+    monkeypatch.setattr(fight.debug_frames, "get_sink", lambda: "sink")
+    monkeypatch.setattr(fight, "FightContext", ctx_factory)
+    monkeypatch.setattr(fight, "BattleBrain", lambda: _Brain(_Emulator(env[0], lambda n: _Spec())))
+    logger: Any = _Logger()
+    with pytest.raises(_StopLoopError):
+        fight._fight_loop(None, logger, False, "Classic 1v1", None, smart_battle=smart, debug_view=True)
+    assert seen == [expected]

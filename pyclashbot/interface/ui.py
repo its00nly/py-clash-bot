@@ -98,6 +98,7 @@ _JOB_TAB_COLUMNS: tuple[tuple[tuple[str, tuple[UIField, ...]], ...], ...] = (
                 UIField.RANDOM_DECKS_USER_TOGGLE,
                 UIField.CYCLE_DECKS_USER_TOGGLE,
                 UIField.SMART_BATTLE_USER_TOGGLE,
+                UIField.DEBUG_VIEW_USER_TOGGLE,
                 UIField.RANDOM_PLAYS_USER_TOGGLE,
             ),
         ),
@@ -190,6 +191,9 @@ class PyClashBotUI(ttk.Window):
         self.max_deck_var: ttk.StringVar | None = None
         self.max_account_var: ttk.StringVar | None = None
         self.deck_hero_card_var: ttk.StringVar | None = None
+        # "Open debug view" button (shown while the Debug view toggle is on) and its window.
+        self._debug_view_button: ttk.Button | None = None
+        self._debug_window = None
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)  # Tab area absorbs extra height
@@ -840,8 +844,43 @@ class PyClashBotUI(ttk.Window):
                 for job_key in job_keys:
                     job = jobs_by_key[job_key]
                     grid_row = add_job_row(section_frame, job, grid_row)
+                    if job_key == UIField.DEBUG_VIEW_USER_TOGGLE:
+                        grid_row = self._add_debug_view_button(section_frame, grid_row)
 
         self._sync_all_job_toggle_appearances()
+
+    def _add_debug_view_button(self, parent: tk.Misc, row_index: int) -> int:
+        """'Open debug view' under the Debug view toggle; visible only while the toggle is on.
+
+        Not registered as a config widget, so it stays clickable while the bot runs.
+        """
+        button = ttk.Button(parent, text="Open debug view", bootstyle="info-outline", command=self.open_debug_view)
+        button.grid(row=row_index, column=0, sticky="w", padx=(22, 0), pady=(0, 4))
+        self._debug_view_button = button
+        var = self.jobs_vars[UIField.DEBUG_VIEW_USER_TOGGLE]
+        var.trace_add("write", lambda *_: self._sync_debug_view_button())
+        self._sync_debug_view_button()
+        return row_index + 1
+
+    def _sync_debug_view_button(self) -> None:
+        button = self._debug_view_button
+        var = self.jobs_vars.get(UIField.DEBUG_VIEW_USER_TOGGLE)
+        if button is None or var is None:
+            return
+        if bool(var.get()):
+            button.grid()
+        else:
+            button.grid_remove()
+
+    def open_debug_view(self) -> None:
+        """Open (or raise) the live debug view window."""
+        from pyclashbot.interface.debug_window import DebugViewWindow  # lazy: PIL/ImageTk only when used
+
+        window = self._debug_window
+        if window is not None and window.alive():
+            window.lift()
+            return
+        self._debug_window = DebugViewWindow(self)
 
     def can_start(self) -> bool:
         """True when at least one battle, clan chat, or collection job is enabled."""

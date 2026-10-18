@@ -524,6 +524,7 @@ def state_tree(
                 custom_path=custom_path,
                 smart_battle=job_list.get(UIField.SMART_BATTLE_USER_TOGGLE, True),
                 hero_card=job_list.get(UIField.DECK_HERO_CARD) or None,
+                debug_view=bool(job_list.get(UIField.DEBUG_VIEW_USER_TOGGLE, False)),
             )
             is False
         ):
@@ -554,6 +555,7 @@ def state_tree(
                 custom_path=custom_path,
                 smart_battle=job_list.get(UIField.SMART_BATTLE_USER_TOGGLE, True),
                 hero_card=job_list.get(UIField.DECK_HERO_CARD) or None,
+                debug_view=bool(job_list.get(UIField.DEBUG_VIEW_USER_TOGGLE, False)),
             )
             is False
         ):
