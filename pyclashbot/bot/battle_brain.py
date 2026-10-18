@@ -25,6 +25,11 @@ This module plays more like a person:
 * **Memory.** Tracks our own deck and rotation (resolving an unreadable slot from the
   rotation), infers the win condition, remembers threats for a couple of seconds when a
   frame misses them, and models the opponent's push pattern and cards.
+* **Hero card hint.** ``BattleBrain(hero_card="hero_balloon")`` (the user's deck setting) names
+  the card the reader has no fingerprint for; an UNKNOWN slot the rotation can't name becomes
+  it when the slot's cost bounds allow. Tank-led win conditions (``TANK_LED_WINS``: Balloon)
+  never defend: they go in behind a back tank as it nears the bridge, or right behind a
+  Lumberjack at the bridge (Lumberloon), and alone only near a leak or at a low tower.
 
 Pure decision logic over (hand, units, elixir, time) so it is unit-testable offline;
 ``fight.py`` owns the screenshots and clicks.
@@ -346,6 +351,25 @@ UNKNOWN_CARD = "UNKNOWN"
 DECK_X = "deck_x"
 _INFER_WIN_KNOWN = 6
 _INFER_WIN_PLAYS = 8
+# A played card is back in hand after this many more deployed plays (4-card queue).
+_ROTATION_DEPTH = 4
+
+# Tank-led win conditions: they only hit buildings, so they never defend and go in behind a
+# tank (Giant Skeleton at the back) or a Lumberjack at the bridge, not alone.
+TANK_LED_WINS = frozenset({"balloon"})
+# Bridge leaders for the Lumberloon-style pair (leader at the bridge, win condition right behind).
+PAIR_LEADERS = frozenset({"lumberjack"})
+PAIR_MIN_BY_PHASE = {PHASE_SINGLE: 8, PHASE_DOUBLE: 7, PHASE_OT2: 7, PHASE_OT3: 7}
+# How long the win condition may follow its bridge leader (elixir catch-up included).
+PAIR_FOLLOW_S = 4.0
+# ~1 tile behind the tank / leader (an arena tile is ~16 px at this resolution).
+_TANK_LED_BEHIND_DY = 18
+# After a tank-led push goes in, spells stay in hand for the swarms that defend it.
+TANK_LED_PUSH_S = 12.0
+# Tank-led offense prefers the weaker enemy tower once the reads differ by this much.
+_WIN_LANE_HP_MARGIN = 0.05
+_PAIR_REASON = "lumberloon"
+_TANK_LED_REASON = "tank-led"
 
 # Opponent pattern detection.
 _PUSH_GAP_S = 3.0
@@ -447,6 +471,21 @@ def _is(card_id: str, group: frozenset[str]) -> bool:
 
 def _known(card_id: str | None) -> bool:
     return bool(card_id) and card_id not in (UNKNOWN_CARD, DECK_X)
+
+
+def normalize_hero_card(card_id: object) -> str | None:
+    """The deck hero-card setting as a card id, or None for blank / "None" / "auto"."""
+    if not card_id:
+        return None
+    text = str(card_id).strip()
+    if not text or text.lower() in ("none", "auto", "none/auto") or text in (UNKNOWN_CARD, DECK_X):
+        return None
+    return text
+
+
+def is_tank_led_win(card_id: str | None) -> bool:
+    """Balloon-style win condition: building-only, played behind a tank, never on defense."""
+    return _known(card_id) and _base_card_id(str(card_id)) in TANK_LED_WINS
 
 
 def lane_of(x: float) -> str:
@@ -612,15 +651,25 @@ class DeckTracker:
     Card ids are kept as base ids (``evo_furnace`` and ``furnace`` are one card). Plays are
     logged with their hand slot: the card that refills slot ``s`` after a play is the one
     played 4 deployed plays earlier, which names a slot the card reader can't identify.
+
+    ``hero_card`` (the user's deck setting, e.g. ``hero_balloon``) names a card the reader
+    has no fingerprint for: it counts as one of the 8 deck cards from the start, and an
+    UNKNOWN slot the rotation can't name becomes it when the slot's cost bounds allow it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, hero_card: str | None = None) -> None:
         self.deck: list[str] = []
         self._order: list[str] = []  # played cards, oldest first (= next to come back)
         self.plays: list[tuple[int | None, str, bool]] = []  # (slot, card, deployed)
         # Elixir cost bounds (lo, hi) of the UNKNOWN card in each slot, from affordability.
         self.cost_bounds: dict[int, tuple[int, int]] = {}
         self._warned_unknown = False
+        self.hero_card = normalize_hero_card(hero_card)
+        self.hero_base = _base_card_id(self.hero_card) if self.hero_card else None
+        # UNKNOWN slots that might be the hero card but couldn't be pinned down (2+ candidates).
+        self.maybe_hero_slots: set[int] = set()
+        if self.hero_base:
+            self.deck.append(self.hero_base)
 
     def _label(self, card_id: str | None) -> str | None:
         """Base id for a known card, ``deck_x`` for the unreadable 8th card, else None."""
@@ -665,6 +714,50 @@ class DeckTracker:
                 card = deployed[j][1] if j >= 0 else None
                 return _base_card_id(card) if card is not None and _known(card) else None
         return None
+
+    def _plays_since(self, base: str) -> int | None:
+        """Deployed plays after the last deployed ``base`` play (None if it was never played)."""
+        deployed = [c for _, c, d in self.plays if d]
+        for i in range(len(deployed) - 1, -1, -1):
+            if _known(deployed[i]) and _base_card_id(deployed[i]) == base:
+                return len(deployed) - 1 - i
+        return None
+
+    def could_be_hero(self, slot: int, hand: Mapping[int, str]) -> bool:
+        """The UNKNOWN in ``slot`` may be the hero card: its cost fits the slot's affordability
+        bounds, no other slot shows it, and it isn't still in the queue from a recent play."""
+        if self.hero_card is None or self.hero_base is None:
+            return False
+        lo, hi = self.cost_bounds.get(slot, (1, 10))
+        if not lo <= card_cost(self.hero_card) <= hi:
+            return False
+        if any(i != slot and _known(c) and _base_card_id(c) == self.hero_base for i, c in hand.items()):
+            return False
+        since = self._plays_since(self.hero_base)
+        return since is None or since >= _ROTATION_DEPTH
+
+    def resolve_hand(self, hand: Mapping[int, str]) -> dict[int, str]:
+        """Name the UNKNOWN slots: the rotation first, then the hero-card hint where it fits.
+
+        With two or more UNKNOWN slots that could be the hero, the one with the highest cost
+        floor gets it when that floor is unique; otherwise they all stay UNKNOWN and are listed in
+        ``maybe_hero_slots`` (the brain plays none of them).
+        """
+        named = {i: (self.resolve_unknown(i) or c) if c == UNKNOWN_CARD else c for i, c in hand.items()}
+        self.maybe_hero_slots = set()
+        if self.hero_card is None:
+            return named
+        open_slots = [i for i, c in named.items() if c == UNKNOWN_CARD and self.could_be_hero(i, named)]
+        if not open_slots:
+            return named
+        floors = {i: self.cost_bounds.get(i, (1, 10))[0] for i in open_slots}
+        best = max(floors.values())
+        top = [i for i in open_slots if floors[i] == best]
+        if len(top) == 1:
+            named[top[0]] = self.hero_card  # only one copy: the other UNKNOWNs aren't it
+        else:
+            self.maybe_hero_slots = set(open_slots)
+        return named
 
     def played(self, card_id: str, slot: int | None = None, deployed: bool = True) -> None:
         """Log a play from ``slot``; ``deployed=False`` = tapped but the card never went down."""
@@ -858,8 +951,10 @@ def _other(lane: str) -> str:
 class BattleBrain:
     """Per-battle state: lanes, recent plays, cooldowns, tower health, deck rotation, opponent pattern."""
 
-    def __init__(self, clock=time.time, rng: random.Random | None = None) -> None:
+    def __init__(self, clock=time.time, rng: random.Random | None = None, hero_card: str | None = None) -> None:
         self._clock = clock
+        # The user's deck setting for the card the reader can't see (e.g. hero_balloon), or None.
+        self.hero_card = normalize_hero_card(hero_card)
         self._rng = rng or random.Random()
         self.attack_lane = self._rng.choice(("left", "right"))
         self._counter_push_lane: str | None = None
@@ -885,7 +980,12 @@ class BattleBrain:
         self._phase = PHASE_SINGLE
         self._hold_reason = ""
         self.recent: list[int] = []
-        self.deck = DeckTracker()
+        self.deck = DeckTracker(self.hero_card)
+        # Tank-led win condition in hand but not affordable yet (from the full hand).
+        self._waiting_win: str | None = None
+        # Lumberloon-style pair: (win card, lane, drop spot, until) after the leader went down.
+        self._pending_win: tuple[str, str, tuple[int, int], float] | None = None
+        self._tank_led_until = 0.0
         self.opponent = OpponentModel(clock)
         self.situation = ""
 
@@ -924,6 +1024,33 @@ class BattleBrain:
         if not _known(card_id):
             return False
         return _is(card_id, BACK_TANKS) or ck.has_role(card_id, ck.WIN2) or card_id == self.deck.inferred_win()
+
+    def _win_lane(self, lane: str) -> str:
+        """With a tank-led win condition in the deck: the weaker live enemy tower's lane."""
+        if not any(c in TANK_LED_WINS for c in self.deck.deck):
+            return lane
+        left, right = self.enemy_tower_hp("left"), self.enemy_tower_hp("right")
+        if left is None or right is None or left <= 0 or right <= 0:
+            return lane
+        if left + _WIN_LANE_HP_MARGIN <= right:
+            return "left"
+        if right + _WIN_LANE_HP_MARGIN <= left:
+            return "right"
+        return lane
+
+    def _lone_win_ok(self, cards: list[Card], lane: str, elixir: int | None, elixir_full: bool, mode: str) -> bool:
+        """A tank-led win condition without a tank: behind a live push of ours, at a low enemy
+        tower, or about to leak with no tank in hand (never as pressure while we're defending)."""
+        if mode in ("follow", "counter"):
+            return True
+        hp = self.enemy_tower_hp(lane)
+        if hp is not None and 0 < hp <= WEAK_TOWER_HP:
+            return True
+        if mode != "normal":
+            return False
+        near_leak = elixir_full or (elixir is not None and elixir >= NEAR_LEAK_BY_PHASE[self._phase])
+        tank_in_hand = any(self._is_back_tank(c[1]) or ck.has_role(c[1], ck.TANK) for c in cards if _known(c[1]))
+        return near_leak and not tank_in_hand
 
     # ---- towers --------------------------------------------------------------
 
@@ -1088,13 +1215,19 @@ class BattleBrain:
             elapsed_s = float(clock)
         self._phase = match_phase(elapsed_s)
         self._friends = list(friends)
-        hand = {i: (self.deck.resolve_unknown(i) or c) if c == UNKNOWN_CARD else c for i, c in hand.items()}
+        # Cost bounds first: they decide whether an UNKNOWN slot can be the hero card.
+        if full_hand is not None and elixir is not None:
+            self.deck.observe_costs(full_hand, set(hand) if affordable is None else affordable, elixir)
+        named = self.deck.resolve_hand(full_hand if full_hand is not None else hand)
+        hand = {
+            i: c for i, c in hand.items() if not (c == UNKNOWN_CARD and i in self.deck.maybe_hero_slots)
+        }  # an UNKNOWN that might be the hero (2+ candidates) is never played blind
+        hand = {i: named.get(i, c) if c == UNKNOWN_CARD else c for i, c in hand.items()}
+        self._waiting_win = next((c for i, c in named.items() if i not in hand and is_tank_led_win(c)), None)
         pushes = self._summarize(threats, friends, track=True)
         self._pushes = pushes
         self.opponent.observe(pushes, threats)
         self.deck.observe_hand(list(hand.values()))
-        if full_hand is not None and elixir is not None:
-            self.deck.observe_costs(full_hand, set(hand) if affordable is None else affordable, elixir)
         if elixir is not None and elixir >= 10:
             elixir_full = True
         self.situation = self._describe(elixir, pushes)
@@ -1130,6 +1263,10 @@ class BattleBrain:
             options = [c for c in options if _known(c[1])] or options
             index, card_id, picked = self._cheapest(options) if elixir is not None else self._pick(options)
             return Play(index, card_id, picked, OPENING_BACK_COORDS[lane], lane, False, "opening at the back")
+        for tank_led in (self._pair_follow_up, self._tank_led_follow_up):
+            play = tank_led(cards, elixir, elixir_full)
+            if play is not None or self._hold_reason:
+                return play
         if self._following_up():
             assert self._last_win is not None
             return self._offense(cards, self._last_win[0], "follow", elapsed_s, elixir, elixir_full, pushes)
@@ -1266,20 +1403,78 @@ class BattleBrain:
             return False
         return not any(f.lane == lane and f.y < _TANK_AT_BRIDGE_Y for f in self._friends)
 
-    def _behind_push(self, lane: str) -> tuple[int, int] | None:
-        """Just behind our most advanced troop in ``lane``, or where the back tank should be by now."""
+    def _behind_push(self, lane: str, dy: int = _FOLLOW_BEHIND_DY) -> tuple[int, int] | None:
+        """``dy`` px behind our most advanced troop in ``lane``, or where the back tank should be by now."""
         y_min, y_max = OWN_HALF_DROP_Y_RANGE
         ours = [f for f in self._friends if f.lane == lane and f.y < y_max]
         if ours:
             lead = min(ours, key=lambda f: f.y)
-            return _avoid_own_towers(lead.x, _clamp(lead.y + _FOLLOW_BEHIND_DY, y_min, y_max))
+            return _avoid_own_towers(lead.x, _clamp(lead.y + dy, y_min, y_max))
         if self._back_tank_drop is not None and self._back_tank_drop[0] == lane:
             back_x, back_y = BACK_TANK_COORDS[lane]
             tank_y = back_y - TANK_SPEED_PX_S * (self._clock() - self._back_tank_drop[1])
             progress = max(0.0, min(1.0, (back_y - tank_y) / (back_y - y_min)))
             x = int(back_x + (LANE_BRIDGE_X[lane] - back_x) * progress)
-            return _avoid_own_towers(x, _clamp(tank_y + _FOLLOW_BEHIND_DY, y_min, y_max))
+            return _avoid_own_towers(x, _clamp(tank_y + dy, y_min, y_max))
         return None
+
+    def _pair_follow_up(self, cards: list[Card], elixir: int | None, elixir_full: bool) -> Play | None:
+        """Right after the bridge leader (Lumberjack): the win condition just behind it, same lane."""
+        if self._pending_win is None:
+            return None
+        win_id, lane, coord, until = self._pending_win
+        if self._clock() >= until:
+            self._pending_win = None
+            return None
+        wins = [c for c in cards if is_tank_led_win(c[1])]
+        if wins:
+            card = wins[0]
+            reason = f"{_PAIR_REASON}: {_base_card_id(card[1])} right behind the lumberjack in the {lane} lane"
+            return Play(card[0], card[1], ROLE_WIN, coord, lane, False, reason)
+        if self._waiting_win is not None or (elixir is not None and elixir < card_cost(win_id)):
+            if not elixir_full:
+                self._hold_reason = f"saving elixir for the {_base_card_id(win_id)} behind the lumberjack"
+            return None
+        self._pending_win = None  # it isn't in hand any more
+        return None
+
+    def _tank_led_follow_up(self, cards: list[Card], elixir: int | None, elixir_full: bool) -> Play | None:
+        """A back tank is walking up: the tank-led win condition goes ~1 tile behind it once it
+        nears the bridge; until then (and until it's affordable) the elixir is saved for it."""
+        if self._back_tank_drop is None or not self._following_up():
+            return None
+        lane = self._back_tank_drop[0]
+        wins = [c for c in cards if is_tank_led_win(c[1])]
+        if not wins and self._waiting_win is None:
+            return None
+        name = _base_card_id(wins[0][1] if wins else str(self._waiting_win))
+        if self._back_tank_hold() or not wins:
+            if not elixir_full:
+                self._hold_reason = f"holding the {name} until the tank nears the bridge"
+            return None
+        coord = self._behind_push(lane, _TANK_LED_BEHIND_DY)
+        if coord is None:
+            return None
+        card = wins[0]
+        reason = f"{_TANK_LED_REASON}: {name} behind the tank in the {lane} lane"
+        return Play(card[0], card[1], ROLE_WIN, coord, lane, False, reason)
+
+    def _pair(self, cards: list[Card], lane: str, elixir: int | None, elixir_full: bool) -> Play | None:
+        """Lumberloon: with lots of elixir, the Lumberjack at the bridge and the win condition
+        right behind it on the next tick (see ``_pair_follow_up``)."""
+        if elixir is None:
+            return None
+        if not elixir_full and elixir < PAIR_MIN_BY_PHASE[self._phase]:
+            return None
+        wins = [c for c in cards if is_tank_led_win(c[1])]
+        leaders = [c for c in cards if _known(c[1]) and _is(c[1], PAIR_LEADERS)]
+        if not wins or not leaders:
+            return None
+        lane = self._win_lane(lane)
+        bridge = (LANE_BRIDGE_X[lane], OWN_HALF_DROP_Y_RANGE[0])
+        index, card_id, picked = self._pick(leaders)
+        reason = f"{_PAIR_REASON}: lumberjack at the {lane} bridge, {_base_card_id(wins[0][1])} next"
+        return Play(index, card_id, picked, bridge, lane, False, reason)
 
     def _last_swarm_answer(self, card_id: str, hand_ids: Sequence[str]) -> bool:
         """``card_id`` is the only swarm spell in hand and none comes back within 2 plays."""
@@ -1367,13 +1562,16 @@ class BattleBrain:
         if finish is not None:
             return finish
         spells_blocked = bool(pushes) or bool(self._remembered(SPELL_BLOCK_MEMORY_S))
+        # A tank-led push is in: spells stay for the swarms that defend it, not the tower.
+        spells_blocked = spells_blocked or self._clock() < self._tank_led_until
         if not spells_blocked:
             chip = self._tiebreak_chip(cards, elapsed_s)
             if chip is not None:
                 return chip
         if mode == "normal":
             for special in (
-                self._back_tank(cards, lane, elixir, elixir_full),
+                self._back_tank(cards, self._win_lane(lane), elixir, elixir_full),
+                self._pair(cards, lane, elixir, elixir_full),
                 self._spawner(cards, lane, elixir, pushes),
                 self._cycle(cards, lane, elixir) if elixir is not None and not elixir_full else None,
             ):
@@ -1393,12 +1591,15 @@ class BattleBrain:
                 if c[2] not in (ROLE_SPELL, ROLE_BUILDING, ROLE_UTILITY, ROLE_OWN_SIDE_SPELL)
                 and tier(c)
                 and self._affordable_on_offense(c, elixir, elixir_full, mode)
+                and (not is_tank_led_win(c[1]) or self._lone_win_ok(cards, lane, elixir, elixir_full, mode))
             ]
             if elixir is not None and not elixir_full:
                 # Back tanks wait for the full-elixir push (see _back_tank), never a naked bridge drop.
                 options = [c for c in options if not self._is_back_tank(c[1])]
             if hold:
-                options = [c for c in options if self._role(c[1]) in (ROLE_WIN, ROLE_SUPPORT)]
+                options = [
+                    c for c in options if self._role(c[1]) in (ROLE_WIN, ROLE_SUPPORT) and not is_tank_led_win(c[1])
+                ]
             if not options:
                 continue
             index, card_id, _ = self._pick(options)
@@ -1413,8 +1614,9 @@ class BattleBrain:
         return None
 
     def _offense_coord(self, card_id: str, role: str, lane: str, mode: str, elapsed_s: float) -> tuple[int, int] | None:
-        if mode in ("follow", "counter") and role != ROLE_WIN:
-            behind = self._behind_push(lane) if (mode == "counter" or self._back_tank_drop) else None
+        if mode in ("follow", "counter") and (role != ROLE_WIN or is_tank_led_win(card_id)):
+            dy = _TANK_LED_BEHIND_DY if is_tank_led_win(card_id) else _FOLLOW_BEHIND_DY
+            behind = self._behind_push(lane, dy) if (mode == "counter" or self._back_tank_drop) else None
             if behind is not None:
                 return behind
         if not _known(card_id) or (role != ROLE_WIN and ck.has_role(card_id, ck.CY)):
@@ -1484,8 +1686,8 @@ class BattleBrain:
         """Empty board, plenty of elixir and no win card to start a push: a spawner builds value."""
         if elixir is None or elixir < CYCLE_MIN_ELIXIR or pushes:
             return None
-        if any(self._role(c[1]) == ROLE_WIN or self._is_back_tank(c[1]) for c in cards):
-            return None
+        if any((self._role(c[1]) == ROLE_WIN and not is_tank_led_win(c[1])) or self._is_back_tank(c[1]) for c in cards):
+            return None  # a held tank-led win condition (waiting for its tank) doesn't block value
         spawners = [c for c in cards if _is(c[1], SPAWNER_BUILDINGS)]
         if not spawners:
             return None
@@ -1571,9 +1773,19 @@ class BattleBrain:
             return
         if self._counter_window_open() and play.role != ROLE_WIN:
             self._counter_push_spent += card_cost(play.card_id)
+        if play.reason.startswith(_PAIR_REASON) and not is_tank_led_win(play.card_id):
+            win_id = next((c for c in self.deck.deck if c in TANK_LED_WINS), "balloon")
+            behind = (play.coord[0], play.coord[1] + _TANK_LED_BEHIND_DY)
+            self._pending_win = (win_id, play.lane, behind, now + PAIR_FOLLOW_S)
+        tank_led = is_tank_led_win(play.card_id)
+        if tank_led:
+            self._pending_win = None
+            self._tank_led_until = now + TANK_LED_PUSH_S
         if play.coord == BACK_TANK_COORDS[play.lane] and (play.role == ROLE_WIN or self._is_back_tank(play.card_id)):
             self._last_win = (play.lane, now, BACK_TANK_FOLLOW_UP_S)
             self._back_tank_drop = (play.lane, now)
         elif play.role == ROLE_WIN:
             self._last_win = (play.lane, now, SUPPORT_FOLLOW_UP_S)
-            self._back_tank_drop = None
+            behind_our_tank = self._back_tank_drop is not None and self._back_tank_drop[0] == play.lane
+            if not (tank_led and behind_our_tank):
+                self._back_tank_drop = None  # keep following the tank the win condition went in behind

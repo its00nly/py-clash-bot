@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pyclashbot.bot.card_detection import CARD_GROUPS
+from pyclashbot.bot.card_knowledge import CARDS
 from pyclashbot.emulators.google_play import GooglePlayEmulatorController
 from pyclashbot.interface.enums import (
     BATTLE_STAT_FIELDS,
@@ -74,6 +76,18 @@ BOT_STATS = [
     StatConfig(BotStatField.RESTARTS_AFTER_FAILURE, BOT_STAT_LABELS[BotStatField.RESTARTS_AFTER_FAILURE]),
     StatConfig(BotStatField.TIME_SINCE_START, BOT_STAT_LABELS[BotStatField.TIME_SINCE_START], size=(8, 1)),
 ]
+
+# Deck hero card (smart battle): the card the hand reader has no fingerprint for.
+DECK_HERO_NONE = "None"
+
+
+def deck_hero_card_options() -> list[str]:
+    """ "None" (auto), then every hero_ card id, then every other card id."""
+    ids = {card for cards in CARD_GROUPS.values() for card in cards} | set(CARDS)
+    heroes = sorted(card for card in ids if card.startswith("hero_"))
+    others = sorted(card for card in ids if not card.startswith("hero_"))
+    return [DECK_HERO_NONE, *heroes, *others]
+
 
 # Job Configuration (order matches bot state machine: switch_account → upgrade → …)
 JOBS = [
@@ -196,6 +210,18 @@ JOBS = [
         "🧠 Smart battle AI",
         default=True,
         tooltip="Defend enemy pushes, counter-push the defended lane, and save win conditions for offense.",
+        extras={
+            UIField.DECK_HERO_CARD: ComboConfig(
+                key=UIField.DECK_HERO_CARD,
+                label="Hero card",
+                values=list(deck_hero_card_options()),
+                default=DECK_HERO_NONE,
+                size=(16, 1),
+                label_size=(10, 1),
+                tooltip="The card in your deck the bot can't read in hand (e.g. hero_balloon). "
+                "Unreadable hand slots that fit its cost are played as it.",
+            )
+        },
     ),
     JobConfig(
         UIField.RANDOM_PLAYS_USER_TOGGLE,

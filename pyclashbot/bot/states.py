@@ -523,6 +523,7 @@ def state_tree(
                 recording_flag=recording_flag,
                 custom_path=custom_path,
                 smart_battle=job_list.get(UIField.SMART_BATTLE_USER_TOGGLE, True),
+                hero_card=job_list.get(UIField.DECK_HERO_CARD) or None,
             )
             is False
         ):
@@ -552,6 +553,7 @@ def state_tree(
                 recording_flag=False,
                 custom_path=custom_path,
                 smart_battle=job_list.get(UIField.SMART_BATTLE_USER_TOGGLE, True),
+                hero_card=job_list.get(UIField.DECK_HERO_CARD) or None,
             )
             is False
         ):

@@ -12,7 +12,7 @@ from typing import Any, Literal
 import numpy
 
 from pyclashbot.bot import card_detection, state_detect
-from pyclashbot.bot.battle_brain import BattleBrain, card_cost
+from pyclashbot.bot.battle_brain import BattleBrain, card_cost, normalize_hero_card
 from pyclashbot.bot.card_detection import (
     check_which_cards_are_available,
     create_default_bridge_iar,
@@ -137,8 +137,12 @@ def do_fight_state(
     recording_flag: bool = False,
     custom_path: str | None = None,
     smart_battle: bool = False,
+    hero_card: str | None = None,
 ) -> bool:
-    """Handle the entirety of a battle state (start fight, do fight, end fight)."""
+    """Handle the entirety of a battle state (start fight, do fight, end fight).
+
+    ``hero_card`` is the deck setting for the card the hand reader can't see (e.g. ``hero_balloon``).
+    """
 
     logger.change_status("Waiting for battle to start")
 
@@ -155,7 +159,8 @@ def do_fight_state(
     # Run regular fight loop if random mode not toggled
     if (
         not random_fight_mode
-        and _fight_loop(emulator, logger, recording_flag, fight_mode_chosen, custom_path, smart_battle) is False
+        and _fight_loop(emulator, logger, recording_flag, fight_mode_chosen, custom_path, smart_battle, hero_card)
+        is False
     ):
         logger.change_status("Fight loop failed")
         return False
@@ -1126,6 +1131,7 @@ def _fight_loop(
     fight_mode: str = "Classic 1v1",
     custom_path: str | None = None,
     smart_battle: bool = False,
+    hero_card: str | None = None,
 ) -> bool:
     """Method for handling dynamically timed fight"""
     create_default_bridge_iar(emulator)
@@ -1137,9 +1143,14 @@ def _fight_loop(
     # Initialize battle strategy and start timing
     battle_strategy = BattleStrategy(fight_mode)
     battle_strategy.start_battle()
-    brain = BattleBrain() if smart_battle else None
+    hero_card = normalize_hero_card(hero_card)
+    brain = None
+    if smart_battle:
+        brain = BattleBrain(hero_card=hero_card) if hero_card else BattleBrain()
     if brain is not None:
         logger.log(f"Smart battle AI on — opening in the {brain.attack_lane} lane")
+        if hero_card:
+            logger.log(f"Deck hero card: {hero_card} (unreadable hand slots may be it)")
     ctx = FightContext(brain, DecisionLog() if brain is not None else None)
 
     while True:

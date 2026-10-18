@@ -20,6 +20,7 @@ from pyclashbot.emulators import EmulatorType, get_available_emulators
 from pyclashbot.interface.config import (
     BLUESTACKS_DEVICE_CONFIG,
     BLUESTACKS_SETTINGS,
+    DECK_HERO_NONE,
     GOOGLE_PLAY_DEVICE_CONFIG,
     GOOGLE_PLAY_SETTINGS,
     JOBS,
@@ -27,6 +28,7 @@ from pyclashbot.interface.config import (
     SESSION_SETTING_DEFAULTS,
     ComboConfig,
     JobConfig,
+    deck_hero_card_options,
 )
 from pyclashbot.interface.enums import (
     BATTLE_STAT_FIELDS,
@@ -109,6 +111,7 @@ _JOB_SPINBOX_LABELS: dict[UIField, str] = {
     UIField.DECK_NUMBER_SELECTION: "Deck slot:",
     UIField.MAX_DECK_SELECTION: "Decks:",
     UIField.MAX_ACCOUNT_SELECTION: "Accounts:",
+    UIField.DECK_HERO_CARD: "Hero card:",
 }
 _JOB_TOGGLE_ON_STYLE = "round-toggle"
 _JOB_TOGGLE_OFF_STYLE = "secondary-round-toggle"
@@ -176,7 +179,7 @@ class PyClashBotUI(ttk.Window):
         self._config_widgets: dict[str, tk.Widget] = {}
         self._job_toggle_checkbuttons: dict[UIField, ttk.Checkbutton] = {}
         self._job_row_extras: dict[UIField, list[tk.Widget]] = {}
-        self._job_extra_spinboxes: dict[UIField, ttk.Spinbox] = {}
+        self._job_extra_spinboxes: dict[UIField, ttk.Spinbox | ttk.Combobox] = {}
         self._theme_labels: list[tk.Widget] = []
         self._muted_labels: list[tk.Widget] = []
         self._stat_accent_labels: list[tk.Widget] = []
@@ -186,6 +189,7 @@ class PyClashBotUI(ttk.Window):
         self.deck_var: ttk.StringVar | None = None
         self.max_deck_var: ttk.StringVar | None = None
         self.max_account_var: ttk.StringVar | None = None
+        self.deck_hero_card_var: ttk.StringVar | None = None
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)  # Tab area absorbs extra height
@@ -223,6 +227,9 @@ class PyClashBotUI(ttk.Window):
         values[UIField.MAX_DECK_SELECTION.value] = self._safe_int(
             self.max_deck_var.get() if self.max_deck_var is not None else "2", fallback=2
         )
+        values[UIField.DECK_HERO_CARD.value] = (
+            self.deck_hero_card_var.get() if self.deck_hero_card_var is not None else DECK_HERO_NONE
+        ) or DECK_HERO_NONE
         values[UIField.SWITCH_ACCOUNTS_USER_TOGGLE.value] = bool(
             self.jobs_vars[UIField.SWITCH_ACCOUNTS_USER_TOGGLE].get()
         )
@@ -284,6 +291,10 @@ class PyClashBotUI(ttk.Window):
                 self.max_deck_var.set(str(values[UIField.MAX_DECK_SELECTION.value]))
             if UIField.MAX_ACCOUNT_SELECTION.value in values and self.max_account_var is not None:
                 self.max_account_var.set(str(values[UIField.MAX_ACCOUNT_SELECTION.value]))
+            if UIField.DECK_HERO_CARD.value in values and self.deck_hero_card_var is not None:
+                saved_hero = str(values[UIField.DECK_HERO_CARD.value] or DECK_HERO_NONE)
+                # Readonly picker: an id no longer offered falls back to "None".
+                self.deck_hero_card_var.set(saved_hero if saved_hero in deck_hero_card_options() else DECK_HERO_NONE)
             if UIField.THEME_NAME.value in values:
                 theme_value = str(values[UIField.THEME_NAME.value])
 
@@ -691,6 +702,26 @@ class PyClashBotUI(ttk.Window):
             label = ttk.Label(parent, text=short_label)
             label.pack(side=LEFT, padx=(0, 4))
             self._job_row_extras.setdefault(job.key, []).append(label)
+
+            if not all(isinstance(v, int) for v in combo_config.values):
+                # Text choices (e.g. the deck hero card): a readonly picker instead of a spinbox.
+                combo_var = ttk.StringVar(value=str(combo_config.default))
+                combo = self._picker_combobox(
+                    parent,
+                    textvariable=combo_var,
+                    values=[str(v) for v in combo_config.values],
+                    width=combo_config.size[0],
+                )
+                combo.pack(side=LEFT)
+                combo.bind("<<ComboboxSelected>>", self._notify_config_change_event)
+                self._register_config_widget(combo_field.value, combo)
+                self._job_extra_spinboxes[job.key] = combo
+                self._job_row_extras.setdefault(job.key, []).append(combo)
+                if combo_config.tooltip:
+                    ToolTip(combo, combo_config.tooltip)
+                if combo_field == UIField.DECK_HERO_CARD:
+                    self.deck_hero_card_var = combo_var
+                return
 
             spin_var = ttk.StringVar(value=str(combo_config.default))
             spinbox = ttk.Spinbox(
