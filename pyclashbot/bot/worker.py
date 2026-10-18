@@ -124,7 +124,13 @@ class WorkerProcess(Process):
                 bs_mode = jobs.get("bluestacks_render_mode", default_mode)
                 render_settings = {"graphics_renderer": bs_mode}
                 bs_device_serial = jobs.get(UIField.BS_DEVICE_SERIAL.value) or None
-                emu = controller_class(logger=logger, render_settings=render_settings, device_serial=bs_device_serial)
+                bs_instance = jobs.get(UIField.BS_INSTANCE.value) or None
+                emu = controller_class(
+                    logger=logger,
+                    render_settings=render_settings,
+                    device_serial=bs_device_serial,
+                    instance_name=bs_instance,
+                )
 
             elif emulator_selection == EmulatorType.MEMU:
                 print("Creating MEmu emulator")

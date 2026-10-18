@@ -362,6 +362,7 @@ class PyClashBotUI(ttk.Window):
         values[UIField.ADB_SERIAL.value] = self.adb_serial_var.get()
         values[UIField.GP_DEVICE_SERIAL.value] = self.gp_device_serial_var.get()
         values[UIField.BS_DEVICE_SERIAL.value] = self.bs_device_serial_var.get()
+        values[UIField.BS_INSTANCE.value] = self.bs_instance_var.get()
 
         values[UIField.THEME_NAME.value] = self.theme_var.get() or self.DEFAULT_THEME
         values[UIField.DISCORD_RPC_TOGGLE.value] = bool(self.discord_rpc_var.get())
@@ -453,6 +454,8 @@ class PyClashBotUI(ttk.Window):
                 self.gp_device_serial_var.set(str(values[UIField.GP_DEVICE_SERIAL.value]))
             if UIField.BS_DEVICE_SERIAL.value in values:
                 self.bs_device_serial_var.set(str(values[UIField.BS_DEVICE_SERIAL.value]))
+            if UIField.BS_INSTANCE.value in values:
+                self.bs_instance_var.set(str(values[UIField.BS_INSTANCE.value] or ""))
 
             self._update_google_play_comboboxes()
 
@@ -522,6 +525,7 @@ class PyClashBotUI(ttk.Window):
                         self.adb_serial_combo,
                         self.gp_device_serial_combo,
                         self.bs_device_serial_combo,
+                        self.bs_instance_combo,
                     ):
                         widget.configure(state=tk.DISABLED if running else tk.NORMAL)
                     else:
@@ -1413,6 +1417,21 @@ class PyClashBotUI(ttk.Window):
         device_frame = self._section_labelframe(parent_frame, "Device")
         device_frame.pack(fill=X, pady=(0, 6))
 
+        # Instance row: which BlueStacks instance to boot
+        instance_row = ttk.Frame(device_frame)
+        instance_row.pack(fill="x", pady=(0, 5))
+        instance_row.columnconfigure(1, weight=1)
+        ttk.Label(instance_row, text="Instance:").grid(row=0, column=0, padx=(0, 5), sticky="w")
+        self.bs_instance_var = ttk.StringVar(value="")
+        self.bs_instance_combo = self._picker_combobox(
+            instance_row,
+            textvariable=self.bs_instance_var,
+            state=tk.NORMAL,
+        )
+        self.bs_instance_combo.grid(row=0, column=1, padx=5, sticky="ew")
+        self._register_config_widget(UIField.BS_INSTANCE.value, self.bs_instance_combo)
+        self._trace_variable(self.bs_instance_var)
+
         # Device serial row
         device_row = ttk.Frame(device_frame)
         device_row.pack(fill="x", pady=(0, 5))
@@ -1483,7 +1502,8 @@ class PyClashBotUI(ttk.Window):
         # Note about auto-discovery
         note_label = ttk.Label(
             device_frame,
-            text="Leave empty to auto-detect from BlueStacks config",
+            text="Instance: the BlueStacks install with your Clash account (empty = pyclashbot-136).\n"
+            "Device: leave empty to auto-detect from BlueStacks config.",
             font=("TkDefaultFont", 8),
             foreground=self._muted_foreground(),
         )

@@ -324,7 +324,7 @@ USER_CONFIG_KEYS = (
         UIField.RECORD_FIGHTS_TOGGLE.value,
         UIField.RECORDING_FOLDER_PATH.value,
     ]  # Data settings
-    + [UIField.GP_DEVICE_SERIAL.value, UIField.BS_DEVICE_SERIAL.value]  # Device serial settings
+    + [UIField.GP_DEVICE_SERIAL.value, UIField.BS_DEVICE_SERIAL.value, UIField.BS_INSTANCE.value]  # Device settings
     + [field.value for field in SESSION_SETTING_FIELDS]
     + [UIField.MUMU_INSTANCE_INDEX.value]
 )

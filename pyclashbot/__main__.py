@@ -174,6 +174,8 @@ def make_job_dictionary(values: dict[str, Any]) -> dict[str, Any]:
 
     bs_serial = values.get(UIField.BS_DEVICE_SERIAL.value)
     job_dictionary[UIField.BS_DEVICE_SERIAL.value] = bs_serial.strip() if bs_serial else None
+    bs_instance = values.get(UIField.BS_INSTANCE.value)
+    job_dictionary[UIField.BS_INSTANCE.value] = bs_instance.strip() if bs_instance else None
 
     return job_dictionary
 
@@ -325,6 +327,7 @@ class BotApplication:
         # Auto-refresh device lists when dropdown opens
         self.ui.gp_device_serial_combo.configure(postcommand=self._refresh_gp_devices)
         self.ui.bs_device_serial_combo.configure(postcommand=self._refresh_bs_devices)
+        self.ui.bs_instance_combo.configure(postcommand=self._refresh_bs_instances)
 
         # Multiprocessing primitives
         self.process: WorkerProcess | None = None
@@ -597,6 +600,17 @@ class BotApplication:
     def _refresh_bs_devices(self) -> None:
         """Refresh device list for BlueStacks dropdown (called on open)."""
         self._refresh_device_dropdown(self.ui.bs_device_serial_combo, BlueStacksEmulatorController, "BlueStacks")
+
+    def _refresh_bs_instances(self) -> None:
+        """Fill the BlueStacks instance dropdown from bluestacks.conf (called on open)."""
+        try:
+            instances = BlueStacksEmulatorController.list_instances()
+        except Exception:
+            logging.exception("Failed to list BlueStacks instances")
+            instances = []
+        self.ui.bs_instance_combo.configure(values=["", *instances])
+        if not instances:
+            self.logger.change_status("No BlueStacks instances found")
 
     def _on_adb_connect(self) -> None:
         device_address = self.ui.adb_serial_var.get()

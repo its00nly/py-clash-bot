@@ -19,6 +19,12 @@ from pyclashbot.utils.subprocess import run as run_command
 DEBUG = False
 
 
+DEFAULT_INSTANCE_NAME = "pyclashbot-136"
+
+# Android SDK level per BlueStacks image, used to tell instances apart on a shared ADB port.
+INSTANCE_IMAGE_SDK = {"Nougat32": 25, "Nougat64": 25, "Pie64": 28, "Rvc64": 30, "Tiramisu64": 33}
+
+
 class BlueStacksEmulatorController(AdbBasedController):
     """BlueStacks 5 controller using HD-Adb.
 
@@ -43,11 +49,19 @@ class BlueStacksEmulatorController(AdbBasedController):
         except Exception:
             return None
 
-    def __init__(self, logger, render_settings: dict | None = None, device_serial: str | None = None):
+    def __init__(
+        self,
+        logger,
+        render_settings: dict | None = None,
+        device_serial: str | None = None,
+        instance_name: str | None = None,
+    ):
         self.logger = logger
         self.expected_dims = (419, 633)  # Bypassing bs5's stupid dim limits
 
-        self.instance_name = "pyclashbot-136"
+        # A user-picked instance (display name) is used as-is: never renamed, never swapped.
+        self._user_instance = bool(instance_name and instance_name.strip())
+        self.instance_name = instance_name.strip() if instance_name and instance_name.strip() else DEFAULT_INSTANCE_NAME
         self.internal_name: str | None = None
         self.instance_port: int | None = None
         self._user_device_serial = device_serial
@@ -103,6 +117,18 @@ class BlueStacksEmulatorController(AdbBasedController):
         else:
             self.device_serial: str = f"127.0.0.1:{self.instance_port}"
 
+    @classmethod
+    def list_instances(cls) -> list[str]:
+        """Display names of every BlueStacks 5 instance in bluestacks.conf (for the UI picker)."""
+        try:
+            conf_path, _ = cls._find_config_paths()
+            with open(conf_path, encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except Exception:
+            return []
+        names = re.findall(r'^bst\.instance\.[^.=]+\.display_name="([^"]*)"\s*$', text, flags=re.M)
+        return sorted({n for n in names if n})
+
     @staticmethod
     def _find_install_location() -> str:
         """Locate BlueStacks 5 installation folder."""
@@ -126,7 +152,8 @@ class BlueStacksEmulatorController(AdbBasedController):
             "BlueStacks 5 installation not found (HD-Player.exe missing)."
         )  # Seriously wtf happened better reinstall to fix
 
-    def _find_config_paths(self) -> tuple[str, str]:
+    @staticmethod
+    def _find_config_paths() -> tuple[str, str]:
         """Return (bluestacks_conf_path, mim_meta_path) for the current platform."""
         if is_macos():
             base = "/Users/Shared/Library/Application Support/BlueStacks"
@@ -136,7 +163,7 @@ class BlueStacksEmulatorController(AdbBasedController):
             return bs_conf, mim_meta
 
         # Windows: Use registry DataDir
-        data_dir = self._get_bluestacks_registry_value("DataDir")
+        data_dir = BlueStacksEmulatorController._get_bluestacks_registry_value("DataDir")
         dd = normpath(str(data_dir)) if data_dir else None
         if not dd:
             raise FileNotFoundError("BlueStacks DataDir not found in registry.")
@@ -370,6 +397,11 @@ class BlueStacksEmulatorController(AdbBasedController):
         return None
 
     def _ensure_managed_instance(self):
+        if self._user_instance and not self._display_name_exists(self.bs_conf_path, self.instance_name):
+            available = ", ".join(self.list_instances()) or "none"
+            raise EmulatorNotReadyError(
+                f"BlueStacks instance '{self.instance_name}' not found. Available instances: {available}."
+            )
         # If display entry exists
         if self._display_name_exists(self.bs_conf_path, self.instance_name):
             self.internal_name = self._find_internal_by_display_name(
@@ -479,6 +511,45 @@ class BlueStacksEmulatorController(AdbBasedController):
                 with open(self.bs_conf_path, "w", encoding="utf-8") as f:
                     f.write(conf)
                 self.logger.log(f"[BlueStacks 5] Enforced VM config for '{internal}'")
+
+    def _expected_sdk(self) -> int | None:
+        """Android SDK level implied by the instance's image (Pie64_2 -> 28), if known."""
+        base = re.sub(r"_\d+$", "", self.internal_name or "")
+        return INSTANCE_IMAGE_SDK.get(base)
+
+    def _connected_instance_matches(self) -> bool:
+        """False when the device on our serial is clearly a different BlueStacks instance.
+
+        Instances can share an ADB port (bluestacks.conf often gives every instance 5555), so
+        whichever one is already running answers on it. The Android version is the cheapest
+        tell-apart; when unknown we can't judge and assume it's fine.
+        """
+        expected = self._expected_sdk()
+        if expected is None:
+            return True
+        res = self.adb("shell getprop ro.build.version.sdk")
+        out = (res.stdout or "").strip()
+        if res.returncode != 0 or not out.isdigit():
+            return True
+        return int(out) == expected
+
+    def _other_running_instances(self) -> list[str]:
+        """Window titles of other running HD-Player instances (Windows only)."""
+        if is_macos():
+            return []
+        try:
+            res = run_command(["tasklist", "/v", "/fi", "IMAGENAME eq HD-Player.exe", "/fo", "csv"], timeout=15)
+        except Exception:
+            return []
+        titles = []
+        reader = csv.reader(io.StringIO(res.stdout or ""))
+        next(reader, None)
+        for row in reader:
+            if row and row[0].strip().lower() == "hd-player.exe":
+                title = row[-1].strip()
+                if title and title != self.instance_name and title.upper() != "N/A":
+                    titles.append(title)
+        return titles
 
     def _reset_adb_server(self) -> None:
         with suppress(Exception):
@@ -606,7 +677,7 @@ class BlueStacksEmulatorController(AdbBasedController):
         self.logger.change_status("Starting BlueStacks 5 emulator restart process...")
 
         # Clean up our target instance only (Windows can be slow to actually close)
-        self.logger.change_status("Stopping pyclashbot BlueStacks 5 instance...")
+        self.logger.change_status(f"Stopping BlueStacks 5 instance '{self.instance_name}'...")
         self.stop()
         stop_deadline = time.time() + 60
         while self._is_this_instance_running():
@@ -615,6 +686,13 @@ class BlueStacksEmulatorController(AdbBasedController):
                 raise EmulatorNotReadyError("BlueStacks 5 restart() timed out waiting for the instance to stop")
             self.stop()
             time.sleep(1)
+
+        others = self._other_running_instances()
+        if others:
+            self.logger.log(
+                f"[BlueStacks 5] Other instances running: {', '.join(others)}. If they share an ADB port with "
+                f"'{self.instance_name}', the bot may attach to the wrong one."
+            )
 
         # Reset our private adb server before launching
         self._reset_adb_server()
@@ -649,6 +727,20 @@ class BlueStacksEmulatorController(AdbBasedController):
         # adbd answers before Android has finished booting; launching then fails (#741)
         self.logger.change_status("Waiting for Android to finish booting...")
         self.wait_for_boot(timeout=120)
+
+        # Make sure the port didn't land us on a different instance sharing it.
+        if not self._connected_instance_matches():
+            self._refresh_instance_port()
+            self._connect()
+            if not self._connected_instance_matches():
+                others = ", ".join(self._other_running_instances()) or "another instance"
+                self.logger.change_status(
+                    f"Wrong BlueStacks instance on {self.device_serial}: close {others} or pick it in Emulator settings"
+                )
+                raise EmulatorNotReadyError(
+                    f"ADB {self.device_serial} is connected to {others}, not '{self.instance_name}'. Close the "
+                    "other BlueStacks instance, or select the instance you want in the Emulator settings."
+                )
 
         # Launch Clash Royale (raises EmulatorNotReadyError if it isn't installed)
         clash_pkg = CLASH_ROYALE_PACKAGE

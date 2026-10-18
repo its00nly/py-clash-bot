@@ -92,6 +92,7 @@ def _changed_values(ui) -> dict[str, object]:
     changed[UIField.ADB_SERIAL.value] = "127.0.0.1:5555"
     changed[UIField.GP_DEVICE_SERIAL.value] = "emulator-5556"
     changed[UIField.BS_DEVICE_SERIAL.value] = "127.0.0.1:5565"
+    changed[UIField.BS_INSTANCE.value] = "BlueStacks App Player"
     changed[UIField.THEME_NAME.value] = "superhero"
     changed[UIField.RECORDING_FOLDER_PATH.value] = str(Path(os.environ.get("APPDATA", ".")) / "recs")
     changed[UIField.DISCORD_WEBHOOK_URL.value] = "https://example.invalid/webhook"

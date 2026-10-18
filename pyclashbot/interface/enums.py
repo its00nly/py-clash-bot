@@ -80,6 +80,7 @@ class UIField(StrEnum):
     ADB_SERIAL = "adb_serial"
     GP_DEVICE_SERIAL = "gp_device_serial"
     BS_DEVICE_SERIAL = "bs_device_serial"
+    BS_INSTANCE = "bs_instance"
     MUMU_EMULATOR_TOGGLE = "mumu_emulator_toggle"
     MUMU_INSTANCE_INDEX = "mumu_instance_index"
     STARTUP_DELAY_SECONDS = "startup_delay_seconds"
